@@ -1,0 +1,182 @@
+# TPX3 Raw Data Parser and EPICS IOC
+
+C++ implementation for parsing Timepix3 raw data with support for all packet types, experimental time extension, and architecture for future 3D clustering and EPICS integration.
+
+## Project Structure
+
+```
+tcpRaw/
+├── cpp/                           # C++ implementation
+│   ├── src/                       # Source files
+│   ├── include/                   # Header files
+│   ├── bin/                       # Compiled executable
+│   ├── build/                     # Object files
+│   ├── Makefile                   # Build system
+│   └── README.md                  # C++ build/run instructions
+├── python/                        # Reference Python implementation
+│   ├── raw-stream-kaz.py         # Original parser
+│   └── raw_tcp_port.sh           # Helper script
+├── documentation/                 # Documentation
+│   ├── TPX3_EPICS_IOC_Plan.md   # Initial implementation plan
+│   └── Clustering_Architecture.md # Future clustering design
+└── README.md                      # This file
+```
+
+## Quick Start
+
+### Build the Parser
+
+```bash
+cd cpp
+make
+```
+
+### Run
+
+Configure ADTimePix3 EPICS driver:
+```bash
+caput -S TPX3-TEST:cam1:RawFilePath "tcp://listen@127.0.0.1:8085"
+```
+
+Run the parser:
+```bash
+./bin/tpx3_parser
+```
+
+## Features
+
+### ✅ Phase 1: Core Parser (Completed)
+
+- **TCP Client**: Connects to SERVAL on 127.0.0.1:8085
+- **Complete Packet Decoding**: All TPX3 packet types from SERVAL manual
+  - Pixel data (0xa count_fb, 0xb standard)
+  - TDC data (0x6)
+  - Global time (0x44, 0x45)
+  - SPIDR control (0x50, 0x5)
+  - TPX3 control (0x71)
+- **Experimental Time Extension**: Decodes extra timestamp packets
+  - Packet generation timestamp
+  - Minimum/maximum event timestamps
+  - Timestamp extension up to 325 days
+- **Statistics**: Real-time hit counting and rate calculation
+- **Efficient Processing**: 8-byte aligned data handling
+
+### 🎯 Phase 2: Future Enhancements (Planned)
+
+See [Clustering_Architecture.md](documentation/Clustering_Architecture.md) for detailed design.
+
+- **Time Alignment**: Sort hits by timestamp
+- **3D Clustering**: Spatial-temporal clustering with DBSCAN
+- **Centroid Extraction**: Compute cluster centroids
+- **Event Classification**: Identify particle types
+  - Neutrons
+  - Electrons
+  - X-rays
+  - Ions
+- **EPICS Integration**: Publish results via Process Variables
+
+## Implementation Details
+
+### Packet Decoding
+
+Based on SERVAL Manual Appendix: file formats:
+- All data is little-endian
+- Chunks consist of 8-byte header followed by 8-byte words
+- Packet type identified by most significant nibble
+- Time units: 1.5625ns (640 MHz clock) for extended timestamps
+
+### Timestamp Extension
+
+Implements the wraparound-safe algorithm from the manual:
+
+```cpp
+uint64_t extend_timestamp(uint64_t timestamp, uint64_t minimum_timestamp, uint64_t n_bits) {
+    uint64_t bit_mask = (1ULL << n_bits) - 1;
+    uint64_t delta_t = ((timestamp - minimum_timestamp) & bit_mask);
+    return minimum_timestamp + delta_t;
+}
+```
+
+### Coordinate Decoding
+
+PixAddr to (x,y) conversion per Table 6.6:
+- Double column (bits 15-9): 128 columns, left to right
+- Super pixel (bits 8-3): 64 per column, bottom to top
+- Pixel index (bits 2-0): 8 per super pixel
+
+## Comparison with Python Reference
+
+The C++ implementation follows the structure of `python/raw-stream-kaz.py`:
+
+| Feature | Python | C++ |
+|---------|--------|-----|
+| TCP Server | ✅ | ✅ |
+| Pixel Decoding (0xb) | ✅ | ✅ |
+| Pixel Decoding (0xa) | ❌ | ✅ |
+| TDC Decoding | ✅ | ✅ |
+| Extra Timestamps | ❌ | ✅ |
+| All Control Packets | ❌ | ✅ |
+| Statistics | Basic | Enhanced |
+
+## Build Requirements
+
+- C++17 compiler (GCC 7+, Clang 5+)
+- Make
+- POSIX sockets (Linux/macOS)
+
+## Development
+
+### Build Options
+
+```bash
+make          # Standard build
+make debug    # Debug build with symbols
+make clean    # Clean build artifacts
+make run      # Build and run
+```
+
+### Code Organization
+
+- `tpx3_packets.h`: Packet structure definitions
+- `tpx3_decoder.cpp`: Bit manipulation and packet decoding
+- `tcp_server.cpp`: TCP connection handling
+- `timestamp_extension.cpp`: Time extension algorithms
+- `hit_processor.cpp`: Statistics and buffering
+- `main.cpp`: Integration and control flow
+
+## Testing
+
+### Unit Testing (Planned)
+
+- Bit manipulation functions
+- Coordinate decoding
+- Timestamp extension edge cases
+- Packet decoding validation
+
+### Integration Testing (Planned)
+
+- Recorded data playback
+- Comparison with Python output
+- Performance benchmarking
+
+## Documentation
+
+- **TPX3_EPICS_IOC_Plan.md**: Complete implementation plan
+- **Clustering_Architecture.md**: 3D clustering and event classification design
+- **cpp/README.md**: C++ build and usage instructions
+
+## References
+
+- SERVAL Manual - TPX3 raw file format specification
+- Extra packets for time extension documentation
+- ADTimePix3 EPICS driver documentation
+- Timepix3 clustering papers
+
+## License
+
+[Specify license]
+
+## Authors
+
+Based on Python implementation by Amsterdam Scientific Instruments.
+
