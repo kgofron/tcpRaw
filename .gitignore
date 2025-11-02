@@ -42,3 +42,8 @@
 
 # ASI program
 python/
+
+# Linux executable
+bin/
+O.Common/
+O.linux-x86_64/
