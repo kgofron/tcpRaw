@@ -15,6 +15,39 @@
 
 // Helper function to process a single packet (used by reorder buffer callback)
 void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, ChunkMetadata& chunk_meta) {
+    // Check full-byte types first (0x50, 0x71, etc. that can't be distinguished by 4-bit)
+    uint8_t full_type = (word >> 56) & 0xFF;
+    
+    if (full_type == SPIDR_PACKET_ID) {
+        // SPIDR packet ID (0x50)
+        uint64_t packet_count;
+        if (decode_spidr_packet_id(word, packet_count)) {
+            // Packet count tracking
+        }
+        return;
+    }
+    
+    if (full_type == TPX3_CONTROL) {
+        // TPX3 control (0x71)
+        Tpx3ControlCmd cmd;
+        if (decode_tpx3_control(word, cmd)) {
+            // Control command decoded
+        }
+        return;
+    }
+    
+    if (full_type == EXTRA_TIMESTAMP || full_type == EXTRA_TIMESTAMP_MPX3) {
+        // Extra timestamp packets - handled separately in main processing loop
+        return;
+    }
+    
+    if (full_type == GLOBAL_TIME_LOW || full_type == GLOBAL_TIME_HIGH) {
+        // GlobalTime gt = decode_global_time(word);
+        // Future: Use for time extension
+        return;
+    }
+    
+    // For other packets, use 4-bit type
     uint8_t packet_type = (word >> 60) & 0xF;
     processor.incrementPacketType(packet_type);
     
@@ -63,37 +96,10 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
             break;
         }
         
-        case GLOBAL_TIME_LOW:
-        case GLOBAL_TIME_HIGH: {
-            // GlobalTime gt = decode_global_time(word);
-            // Future: Use for time extension
-            break;
-        }
-        
-        case SPIDR_PACKET_ID: {
-            uint64_t packet_count;
-            if (decode_spidr_packet_id(word, packet_count)) {
-                // Packet count tracking
-            }
-            break;
-        }
-        
         case SPIDR_CONTROL: {
             SpidrControl ctrl;
             if (decode_spidr_control(word, ctrl)) {
                 processor.incrementChunkCount();
-            }
-            break;
-        }
-        
-        case 0x7: {
-            // Check if this is TPX3 control
-            uint8_t full_type = (word >> 56) & 0xFF;
-            if (full_type == TPX3_CONTROL) {
-                Tpx3ControlCmd cmd;
-                if (decode_tpx3_control(word, cmd)) {
-                    // Control command decoded
-                }
             }
             break;
         }
