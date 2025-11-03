@@ -10,6 +10,10 @@ void HitProcessor::resetStatistics() {
     stats_.total_chunks = 0;
     stats_.total_tdc_events = 0;
     stats_.total_control_packets = 0;
+    stats_.total_decode_errors = 0;
+    stats_.total_fractional_errors = 0;
+    stats_.total_unknown_packets = 0;
+    stats_.packet_type_counts.clear();
     stats_.hit_rate_hz = 0.0;
     stats_.chip_hit_rates_hz.clear();
     last_update_time_ns_ = 0;
@@ -91,5 +95,21 @@ void HitProcessor::updateHitRate() {
         hits_at_last_update_ = hits_.size();
         chip_hits_at_last_update_ = current_chip_hits;
     }
+}
+
+void HitProcessor::incrementDecodeError() {
+    stats_.total_decode_errors++;
+}
+
+void HitProcessor::incrementFractionalError() {
+    stats_.total_fractional_errors++;
+}
+
+void HitProcessor::incrementUnknownPacket() {
+    stats_.total_unknown_packets++;
+}
+
+void HitProcessor::incrementPacketType(uint8_t packet_type) {
+    stats_.packet_type_counts[packet_type]++;
 }
 

@@ -7,6 +7,8 @@
 #include <iostream>
 #include <cstring>
 #include <iomanip>
+#include <string>
+#include <bitset>
 
 // Process raw data buffer
 void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, ChunkMetadata& chunk_meta) {
@@ -69,6 +71,7 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
             }
         } else {
             // Regular packet processing
+            processor.incrementPacketType(packet_type);
             switch (packet_type) {
                 case PIXEL_COUNT_FB:
                 case PIXEL_STANDARD: {
@@ -84,7 +87,12 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                         
                         processor.addHit(hit);
                     } catch (const std::exception& e) {
-                        std::cerr << "Error decoding pixel data: " << e.what() << std::endl;
+                        processor.incrementDecodeError();
+                        // Only print first few errors to avoid flooding output
+                        static int pixel_error_count = 0;
+                        if (pixel_error_count++ < 5) {
+                            std::cerr << "Error decoding pixel data: " << e.what() << std::endl;
+                        }
                     }
                     break;
                 }
@@ -94,7 +102,17 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                         TDCEvent tdc = decode_tdc_data(word);
                         processor.addTdcEvent(tdc);
                     } catch (const std::exception& e) {
-                        std::cerr << "Error decoding TDC data: " << e.what() << std::endl;
+                        processor.incrementDecodeError();
+                        // Check if this is a fractional error
+                        std::string error_msg = e.what();
+                        if (error_msg.find("fractional") != std::string::npos) {
+                            processor.incrementFractionalError();
+                        }
+                        // Only print first few errors to avoid flooding output
+                        static int tdc_error_count = 0;
+                        if (tdc_error_count++ < 5) {
+                            std::cerr << "Error decoding TDC data: " << error_msg << std::endl;
+                        }
                     }
                     break;
                 }
@@ -136,6 +154,7 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                 
                 default:
                     // Unknown packet type
+                    processor.incrementUnknownPacket();
                     break;
             }
         }
@@ -152,8 +171,22 @@ void print_statistics(const HitProcessor& processor) {
     std::cout << "Total hits: " << stats.total_hits << std::endl;
     std::cout << "Total chunks: " << stats.total_chunks << std::endl;
     std::cout << "Total TDC events: " << stats.total_tdc_events << std::endl;
+    std::cout << "Total control packets: " << stats.total_control_packets << std::endl;
+    std::cout << "Total decode errors: " << stats.total_decode_errors << std::endl;
+    std::cout << "Total fractional errors: " << stats.total_fractional_errors << std::endl;
+    std::cout << "Total unknown packets: " << stats.total_unknown_packets << std::endl;
     std::cout << "Total hit rate: " << std::fixed << std::setprecision(2) 
               << stats.hit_rate_hz << " Hz" << std::endl;
+    
+    if (!stats.packet_type_counts.empty()) {
+        std::cout << "Packet type breakdown:" << std::endl;
+        for (const auto& pair : stats.packet_type_counts) {
+            uint8_t type = pair.first;
+            uint64_t count = pair.second;
+            std::cout << "  Type 0x" << std::hex << static_cast<int>(type) << std::dec
+                      << " (0b" << std::bitset<4>(type) << "): " << count << std::endl;
+        }
+    }
     
     if (!stats.chip_hit_rates_hz.empty()) {
         std::cout << "Per-chip hit rates:" << std::endl;

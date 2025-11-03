@@ -1,5 +1,12 @@
 #include "tpx3_decoder.h"
 #include <stdexcept>
+#include <string>
+
+// Custom exception for TDC fractional errors
+class TdcFractionalError : public std::runtime_error {
+public:
+    TdcFractionalError(const std::string& msg) : std::runtime_error(msg) {}
+};
 
 PixelHit decode_pixel_data(uint64_t data, uint8_t chip_index) {
     uint8_t packet_type = (data >> 60) & 0xF;
@@ -94,7 +101,7 @@ TDCEvent decode_tdc_data(uint64_t data) {
     if (fract == 0) {
         fract = 1;  // Handle old firmware bug
     } else if (fract > 12) {
-        throw std::runtime_error("Invalid fractional TDC part: " + std::to_string(fract));
+        throw TdcFractionalError("Invalid fractional TDC part: " + std::to_string(fract));
     }
     
     tdc.fine_timestamp = fract;

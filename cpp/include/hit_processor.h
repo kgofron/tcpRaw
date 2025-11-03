@@ -11,6 +11,10 @@ struct Statistics {
     uint64_t total_chunks;
     uint64_t total_tdc_events;
     uint64_t total_control_packets;
+    uint64_t total_decode_errors;
+    uint64_t total_fractional_errors;  // TDC fractional timestamp errors
+    uint64_t total_unknown_packets;    // Packets with unknown type
+    std::map<uint8_t, uint64_t> packet_type_counts;  // Count of packets by type
     double hit_rate_hz;  // Total hits per second
     std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
 };
@@ -23,6 +27,10 @@ public:
     void addTdcEvent(const TDCEvent& tdc);
     void incrementChunkCount();
     void processChunkMetadata(const ChunkMetadata& metadata);
+    void incrementDecodeError();
+    void incrementFractionalError();
+    void incrementUnknownPacket();
+    void incrementPacketType(uint8_t packet_type);
     
     const std::vector<PixelHit>& getHits() const { return hits_; }
     const Statistics& getStatistics() const { return stats_; }
