@@ -12,11 +12,12 @@ BIN_DIR = bin
 SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 
-# Target executable
+# Target executables
 TARGET = $(BIN_DIR)/tpx3_parser
+TEST_TARGET = $(BIN_DIR)/tcp_raw_test
 
 # Default target
-all: $(TARGET)
+all: $(TARGET) $(TEST_TARGET)
 
 # Create directories
 $(BUILD_DIR):
@@ -26,8 +27,12 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 # Link
-$(TARGET): $(OBJECTS) | $(BIN_DIR)
-	$(CXX) $(OBJECTS) -o $@ $(LDFLAGS)
+$(TARGET): $(BUILD_DIR)/main.o $(BUILD_DIR)/hit_processor.o $(BUILD_DIR)/tcp_server.o $(BUILD_DIR)/timestamp_extension.o $(BUILD_DIR)/tpx3_decoder.o $(BUILD_DIR)/ring_buffer.o | $(BIN_DIR)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+# Test program (uses different sources)
+$(TEST_TARGET): $(BUILD_DIR)/tcp_raw_test.o $(BUILD_DIR)/tcp_server.o $(BUILD_DIR)/tpx3_decoder.o $(BUILD_DIR)/ring_buffer.o | $(BIN_DIR)
+	$(CXX) $^ -o $@ $(LDFLAGS)
 
 # Compile
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
