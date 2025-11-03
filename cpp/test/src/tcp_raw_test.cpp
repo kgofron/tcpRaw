@@ -101,8 +101,9 @@ public:
         uint16_t chunk_size = header.chunkSize();
         uint8_t chip_index = header.chipIndex();
         
-        // Validate chunk size (must be multiple of 8, reasonable range)
-        if (chunk_size % 8 != 0 || chunk_size == 0 || chunk_size > 65535) {
+        // Validate chunk size (must be multiple of 8, non-zero)
+        // Note: uint16_t max is 65535, so no upper bound check needed
+        if (chunk_size % 8 != 0 || chunk_size == 0) {
             stats.invalid_chunk_sizes++;
             return false;
         }
