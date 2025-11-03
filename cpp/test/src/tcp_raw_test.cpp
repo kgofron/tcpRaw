@@ -608,13 +608,9 @@ void processRawData(const uint8_t* buffer, size_t bytes, AnalysisStats& stats,
         // Check if this is a chunk header
         TPX3ChunkHeader header;
         header.data = word;
+        bool is_chunk_header = header.isValid();
         
-        if (header.isValid()) {
-            // If this is a chunk header and we have a reorder buffer, reset it for new chunk
-            if (reorder_buffer) {
-                reorder_buffer->resetForNewChunk(stats.total_chunks + 1);
-            }
-            
+        if (is_chunk_header) {
             in_chunk = true;
             chunk_words_remaining = header.chunkSize() / 8;
             chip_index = header.chipIndex();
@@ -654,6 +650,11 @@ void processRawData(const uint8_t* buffer, size_t bytes, AnalysisStats& stats,
                 // Process immediately (not SPIDR packet ID or reordering disabled)
                 analyzeWord(word, stats, false, 0, 0);
             }
+        }
+        
+        // Handle reorder buffer reset for chunk headers AFTER processing
+        if (is_chunk_header && reorder_buffer) {
+            reorder_buffer->resetForNewChunk(stats.total_chunks);
         }
         
         if (chunk_words_remaining == 0) {
