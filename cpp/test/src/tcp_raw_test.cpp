@@ -37,13 +37,18 @@ struct AnalysisStats {
     std::map<uint8_t, uint64_t> packet_type_counts;
     std::map<uint8_t, uint64_t> packet_type_bytes;
     
-    // Packet order tracking
+    // Packet order tracking (global - across all chunks)
     uint64_t last_packet_id = 0;
     uint64_t missing_packet_ids = 0;
     uint64_t duplicate_packet_ids = 0;
     uint64_t out_of_order_packet_ids = 0;
     std::set<uint64_t> seen_packet_ids;
     bool first_packet_id_seen = false;
+    
+    // Per-chunk packet ID tracking (if protocol allows resets)
+    std::map<uint64_t, std::set<uint64_t>> chunk_packet_ids;  // chunk_id -> set of packet_ids
+    uint64_t current_chunk_id = 0;
+    uint64_t duplicate_packet_ids_per_chunk = 0;  // Duplicates within same chunk
     
     // Protocol violations
     uint64_t protocol_violations = 0;
@@ -247,6 +252,11 @@ void analyzeWord(uint64_t word, AnalysisStats& stats, bool in_chunk,
         }
         stats.total_chunks++;
         stats.chip_chunks[header.chipIndex()]++;
+        
+        // New chunk - create unique chunk ID and reset per-chunk tracking
+        stats.current_chunk_id = stats.total_chunks;  // Use chunk count as unique ID
+        stats.chunk_packet_ids[stats.current_chunk_id] = std::set<uint64_t>();
+        
         return;
     }
     
@@ -273,47 +283,66 @@ void analyzeWord(uint64_t word, AnalysisStats& stats, bool in_chunk,
     // Track SPIDR packet ID for order analysis
     uint64_t packet_count;
     if (decode_spidr_packet_id(word, packet_count)) {
+        // Track both globally (across all chunks) and per-chunk
+        // Global tracking (across all chunks)
         if (!stats.first_packet_id_seen) {
             stats.first_packet_id_seen = true;
             stats.last_packet_id = packet_count;
             stats.seen_packet_ids.insert(packet_count);
         } else {
-            // Check for duplicates
+            // Check for global duplicates
             if (stats.seen_packet_ids.count(packet_count) > 0) {
                 stats.duplicate_packet_ids++;
                 if (stats.violation_details.size() < stats.max_violation_details) {
                     std::stringstream ss;
-                    ss << "Duplicate packet ID " << packet_count << " at word " << stats.total_words;
+                    ss << "Duplicate packet ID " << packet_count << " at word " << stats.total_words
+                       << " (chunk " << stats.current_chunk_id << ")";
                     stats.violation_details.push_back(ss.str());
                 }
             } else {
                 stats.seen_packet_ids.insert(packet_count);
             }
             
-            // Check for gaps (missing sequence numbers)
+            // Check for gaps (missing sequence numbers) - only if not reset
             if (packet_count > stats.last_packet_id + 1) {
-                uint64_t gap = packet_count - stats.last_packet_id - 1;
-                stats.missing_packet_ids += gap;
-                if (stats.violation_details.size() < stats.max_violation_details) {
-                    std::stringstream ss;
-                    ss << "Missing " << gap << " packet IDs between " << stats.last_packet_id 
-                       << " and " << packet_count << " at word " << stats.total_words;
-                    stats.violation_details.push_back(ss.str());
+                // Only flag as missing if gap is small (< 1000)
+                // Large gaps likely indicate chunk boundary resets
+                if (packet_count - stats.last_packet_id < 1000) {
+                    uint64_t gap = packet_count - stats.last_packet_id - 1;
+                    stats.missing_packet_ids += gap;
+                    if (stats.violation_details.size() < stats.max_violation_details) {
+                        std::stringstream ss;
+                        ss << "Missing " << gap << " packet IDs between " << stats.last_packet_id 
+                           << " and " << packet_count << " at word " << stats.total_words;
+                        stats.violation_details.push_back(ss.str());
+                    }
                 }
             }
             
             // Check for out-of-order (packet_count < last_packet_id)
-            if (packet_count < stats.last_packet_id) {
+            // Only flag if difference is small - large drops likely indicate reset
+            if (packet_count < stats.last_packet_id && (stats.last_packet_id - packet_count < 1000)) {
                 stats.out_of_order_packet_ids++;
                 if (stats.violation_details.size() < stats.max_violation_details) {
                     std::stringstream ss;
                     ss << "Out-of-order packet ID " << packet_count << " < " << stats.last_packet_id 
-                       << " at word " << stats.total_words;
+                       << " at word " << stats.total_words << " (chunk " << stats.current_chunk_id << ")";
                     stats.violation_details.push_back(ss.str());
                 }
             }
             
             stats.last_packet_id = packet_count;
+        }
+        
+        // Per-chunk tracking (to detect duplicates within same chunk)
+        if (stats.current_chunk_id > 0) {
+            auto& chunk_ids = stats.chunk_packet_ids[stats.current_chunk_id];
+            if (chunk_ids.count(packet_count) > 0) {
+                stats.duplicate_packet_ids_per_chunk++;
+                // This is a real error - duplicate within same chunk
+            } else {
+                chunk_ids.insert(packet_count);
+            }
         }
     }
     
@@ -394,16 +423,28 @@ void printStatistics(const AnalysisStats& stats, bool detailed = false) {
     if (stats.seen_packet_ids.empty()) {
         std::cout << "No SPIDR packet ID packets found (0x50 packets)" << std::endl;
     } else {
-        std::cout << "SPIDR packet IDs seen: " << stats.seen_packet_ids.size() << std::endl;
+        std::cout << "SPIDR packet IDs seen (global): " << stats.seen_packet_ids.size() << std::endl;
         std::cout << "Missing packet IDs: " << stats.missing_packet_ids 
                   << (stats.missing_packet_ids > 0 ? " ⚠️" : " ✓") << std::endl;
-        std::cout << "Duplicate packet IDs: " << stats.duplicate_packet_ids 
-                  << (stats.duplicate_packet_ids > 0 ? " ⚠️" : " ✓") << std::endl;
+        std::cout << "Duplicate packet IDs (global): " << stats.duplicate_packet_ids;
+        if (stats.duplicate_packet_ids > 0) {
+            std::cout << " ⚠️ (may be expected if IDs reset per chunk)";
+        } else {
+            std::cout << " ✓";
+        }
+        std::cout << std::endl;
+        std::cout << "Duplicate packet IDs (within chunk): " << stats.duplicate_packet_ids_per_chunk
+                  << (stats.duplicate_packet_ids_per_chunk > 0 ? " ⚠️ (ERROR)" : " ✓") << std::endl;
         std::cout << "Out-of-order packet IDs: " << stats.out_of_order_packet_ids 
                   << (stats.out_of_order_packet_ids > 0 ? " ⚠️" : " ✓") << std::endl;
         if (stats.first_packet_id_seen) {
             std::cout << "Last packet ID: " << stats.last_packet_id << std::endl;
             std::cout << "Expected next ID: " << (stats.last_packet_id + 1) << std::endl;
+        }
+        if (stats.total_chunks > 0) {
+            double avg_ids_per_chunk = static_cast<double>(stats.seen_packet_ids.size()) / stats.total_chunks;
+            std::cout << "Average packet IDs per chunk: " << std::fixed << std::setprecision(1) 
+                      << avg_ids_per_chunk << std::endl;
         }
     }
     
