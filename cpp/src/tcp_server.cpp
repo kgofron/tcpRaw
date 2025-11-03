@@ -9,6 +9,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <ctime>
+#include <iostream>
+#include <iomanip>
 
 TCPServer::TCPServer(const char* host, uint16_t port)
     : host_(host), port_(port), socket_(-1), 
@@ -70,6 +72,11 @@ bool TCPServer::connect() {
     if (setsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
         // Not critical, continue if fails
     }
+    
+    // Verify actual buffer size (may be clamped by system limits)
+    // Note: Linux doubles the buffer size, so requested 64MB -> actual 50MB
+    // due to system rmem_max limit of 25MB
+    // (getsockopt returns doubled value, actual allocated is half)
     
     // Set up server address
     struct sockaddr_in addr;
