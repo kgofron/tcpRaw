@@ -36,7 +36,7 @@ COMPARISON_REPORT="$RESULTS_DIR/comparison_report.txt"
 # Start both tools simultaneously on different ports
 echo "Starting test tool on port ${TEST_PORT}..."
 cd "$PROJECT_ROOT"
-timeout ${DURATION} ${TEST_TOOL} --mode buffer --host 127.0.0.1 --port ${TEST_PORT} --analyze --stats-interval 5 --duration ${DURATION} > "$TEST_OUTPUT" 2>&1 &
+timeout ${DURATION} ${TEST_TOOL} --mode buffer --host 127.0.0.1 --port ${TEST_PORT} --analyze --reorder --stats-interval 5 --duration ${DURATION} > "$TEST_OUTPUT" 2>&1 &
 TEST_PID=$!
 
 sleep 1

@@ -31,11 +31,15 @@ $(TARGET): $(BUILD_DIR)/main.o $(BUILD_DIR)/hit_processor.o $(BUILD_DIR)/tcp_ser
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
 # Test program (uses different sources)
-$(TEST_TARGET): $(BUILD_DIR)/tcp_raw_test.o $(BUILD_DIR)/tcp_server.o $(BUILD_DIR)/tpx3_decoder.o $(BUILD_DIR)/ring_buffer.o | $(BIN_DIR)
+$(TEST_TARGET): $(BUILD_DIR)/tcp_raw_test.o $(BUILD_DIR)/tcp_server.o $(BUILD_DIR)/tpx3_decoder.o $(BUILD_DIR)/ring_buffer.o $(BUILD_DIR)/packet_reorder_buffer.o | $(BIN_DIR)
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
 # Test program source in test/ directory
 $(BUILD_DIR)/tcp_raw_test.o: test/src/tcp_raw_test.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Packet reorder buffer
+$(BUILD_DIR)/packet_reorder_buffer.o: src/packet_reorder_buffer.cpp include/packet_reorder_buffer.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compile

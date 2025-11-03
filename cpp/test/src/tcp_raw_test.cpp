@@ -2,6 +2,7 @@
 #include "ring_buffer.h"
 #include "tpx3_decoder.h"
 #include "tpx3_packets.h"
+#include "packet_reorder_buffer.h"
 
 #include <iostream>
 #include <fstream>
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <cmath>
 #include <sstream>
+#include <memory>
 
 // Analysis statistics
 struct AnalysisStats {
@@ -555,8 +557,29 @@ void printStatistics(const AnalysisStats& stats, bool detailed = false) {
     }
 }
 
+void printReorderStatistics(const PacketReorderBuffer::Statistics& reorder_stats) {
+    if (reorder_stats.total_packets == 0) {
+        return;
+    }
+    
+    std::cout << "\n=== Packet Reordering Statistics ===" << std::endl;
+    std::cout << "Total SPIDR packets: " << reorder_stats.total_packets << std::endl;
+    std::cout << "Processed immediately (in-order): " << reorder_stats.packets_processed_immediately 
+              << " (" << std::fixed << std::setprecision(1) 
+              << (100.0 * reorder_stats.packets_processed_immediately / reorder_stats.total_packets) << "%)" << std::endl;
+    std::cout << "Reordered (buffered): " << reorder_stats.packets_reordered 
+              << " (" << std::fixed << std::setprecision(1) 
+              << (100.0 * reorder_stats.packets_reordered / reorder_stats.total_packets) << "%)" << std::endl;
+    std::cout << "Max reorder distance: " << reorder_stats.max_reorder_distance << " packets" << std::endl;
+    std::cout << "Buffer overflows: " << reorder_stats.buffer_overflows 
+              << (reorder_stats.buffer_overflows > 0 ? " ⚠️" : " ✓") << std::endl;
+    std::cout << "Packets dropped (too old): " << reorder_stats.packets_dropped_too_old 
+              << (reorder_stats.packets_dropped_too_old > 0 ? " ⚠️" : " ✓") << std::endl;
+}
+
 void processRawData(const uint8_t* buffer, size_t bytes, AnalysisStats& stats, 
-                    std::ofstream* out_file = nullptr) {
+                    std::ofstream* out_file = nullptr,
+                    PacketReorderBuffer* reorder_buffer = nullptr) {
     stats.total_bytes += bytes;
     
     // Handle incomplete words
@@ -587,6 +610,11 @@ void processRawData(const uint8_t* buffer, size_t bytes, AnalysisStats& stats,
         header.data = word;
         
         if (header.isValid()) {
+            // If this is a chunk header and we have a reorder buffer, reset it for new chunk
+            if (reorder_buffer) {
+                reorder_buffer->resetForNewChunk(stats.total_chunks + 1);
+            }
+            
             in_chunk = true;
             chunk_words_remaining = header.chunkSize() / 8;
             chip_index = header.chipIndex();
@@ -594,10 +622,38 @@ void processRawData(const uint8_t* buffer, size_t bytes, AnalysisStats& stats,
         
         if (in_chunk && chunk_words_remaining > 0) {
             chunk_words_remaining--;
-            analyzeWord(word, stats, in_chunk, chunk_words_remaining, chip_index);
+            
+            // Check if this is a SPIDR packet ID packet that should be reordered
+            uint64_t packet_count;
+            bool is_spidr_packet_id = decode_spidr_packet_id(word, packet_count);
+            
+            if (is_spidr_packet_id && reorder_buffer) {
+                // Use reorder buffer for SPIDR packet ID packets
+                reorder_buffer->processPacket(word, packet_count, stats.current_chunk_id,
+                    [&stats, in_chunk, chunk_words_remaining, chip_index](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
+                        // Callback: process reordered packet
+                        analyzeWord(w, stats, in_chunk, chunk_words_remaining, chip_index);
+                    });
+            } else {
+                // Process immediately (not SPIDR packet ID or reordering disabled)
+                analyzeWord(word, stats, in_chunk, chunk_words_remaining, chip_index);
+            }
         } else if (!in_chunk) {
-            // Analyze packets outside chunks too
-            analyzeWord(word, stats, false, 0, 0);
+            // Check if this is a SPIDR packet ID packet that should be reordered
+            uint64_t packet_count;
+            bool is_spidr_packet_id = decode_spidr_packet_id(word, packet_count);
+            
+            if (is_spidr_packet_id && reorder_buffer) {
+                // Use reorder buffer for SPIDR packet ID packets
+                reorder_buffer->processPacket(word, packet_count, stats.current_chunk_id,
+                    [&stats](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
+                        // Callback: process reordered packet
+                        analyzeWord(w, stats, false, 0, 0);
+                    });
+            } else {
+                // Process immediately (not SPIDR packet ID or reordering disabled)
+                analyzeWord(word, stats, false, 0, 0);
+            }
         }
         
         if (chunk_words_remaining == 0) {
@@ -636,6 +692,8 @@ void printUsage(const char* prog_name) {
               << "  --duration SECONDS       Run duration (default: 0 = infinite)\n"
               << "  --analyze                Enable detailed packet-level analysis (slower)\n"
               << "  --stats-interval SECONDS Statistics print interval (default: 5)\n"
+              << "  --reorder                Enable packet reordering (default: disabled)\n"
+              << "  --reorder-window SIZE     Reorder buffer window size (default: 1000)\n"
               << "  --help                   Show this help message\n";
 }
 
@@ -649,6 +707,8 @@ int main(int argc, char* argv[]) {
     double duration = 0.0;  // 0 = infinite
     bool detailed_analysis = false;
     double stats_interval = 5.0;
+    bool enable_reorder = false;
+    size_t reorder_window_size = 1000;
     
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -669,6 +729,10 @@ int main(int argc, char* argv[]) {
             detailed_analysis = true;
         } else if (arg == "--stats-interval" && i + 1 < argc) {
             stats_interval = std::stod(argv[++i]);
+        } else if (arg == "--reorder") {
+            enable_reorder = true;
+        } else if (arg == "--reorder-window" && i + 1 < argc) {
+            reorder_window_size = std::stoul(argv[++i]);
         } else if (arg == "--help") {
             printUsage(argv[0]);
             return 0;
@@ -684,6 +748,11 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "Connecting to " << host << ":" << port << std::endl;
     std::cout << "Detailed analysis: " << (detailed_analysis ? "enabled" : "disabled") << std::endl;
+    std::cout << "Packet reordering: " << (enable_reorder ? "enabled" : "disabled");
+    if (enable_reorder) {
+        std::cout << " (window size: " << reorder_window_size << ")";
+    }
+    std::cout << std::endl;
     
     AnalysisStats stats;
     stats.start_time = std::chrono::steady_clock::now();
@@ -703,6 +772,12 @@ int main(int argc, char* argv[]) {
     RingBuffer* ring_buffer = nullptr;
     if (mode == "buffer") {
         ring_buffer = new RingBuffer(buffer_size_mb * 1024 * 1024);
+    }
+    
+    // Setup packet reorder buffer if enabled
+    std::unique_ptr<PacketReorderBuffer> reorder_buffer;
+    if (enable_reorder) {
+        reorder_buffer = std::make_unique<PacketReorderBuffer>(reorder_window_size, true);
     }
     
     TCPServer server(host.c_str(), port);
@@ -742,11 +817,13 @@ int main(int argc, char* argv[]) {
             uint8_t read_buffer[8192];
             size_t read_size = ring_buffer->read(read_buffer, sizeof(read_buffer));
             if (read_size > 0) {
-                processRawData(read_buffer, read_size, stats);
+                processRawData(read_buffer, read_size, stats, nullptr, 
+                              reorder_buffer ? reorder_buffer.get() : nullptr);
             }
         } else {
             // Direct processing for disk mode
-            processRawData(data, size, stats, &out_file);
+            processRawData(data, size, stats, &out_file, 
+                          reorder_buffer ? reorder_buffer.get() : nullptr);
         }
         
         // Print periodic statistics
@@ -757,6 +834,9 @@ int main(int argc, char* argv[]) {
         if (elapsed >= static_cast<int>(stats_interval)) {
             std::cout << "\n[Periodic Statistics Update]" << std::endl;
             printStatistics(stats, detailed_analysis);
+            if (reorder_buffer) {
+                printReorderStatistics(reorder_buffer->getStatistics());
+            }
             std::cout << std::endl;
             last_print = now;
         }
@@ -781,6 +861,9 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Final Statistics ===" << std::endl;
     std::cout << "Data collection completed.\n" << std::endl;
     printStatistics(stats, true);
+    if (reorder_buffer) {
+        printReorderStatistics(reorder_buffer->getStatistics());
+    }
     
     // Cleanup
     if (out_file.is_open()) {
