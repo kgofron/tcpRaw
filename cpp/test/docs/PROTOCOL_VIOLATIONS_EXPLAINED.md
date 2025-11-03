@@ -64,23 +64,30 @@ To determine if violations are real or false positives:
 
 ## Out-of-Order Packets
 
-**Out-of-order packet IDs: 4**
+**Latest Observations:**
+- **Out-of-order packet IDs:** 3 → 7 → 9 (increasing)
+- **Missing packet IDs:** 1 → 1 → 2 (minimal)
 
 These indicate SPIDR packet ID packets received in wrong sequence (e.g., ID 10 received before ID 9).
 
 ### Current Behavior
-- Minimal: Only 4 occurrences
+- **Out-of-order: 9 occurrences** - Indicates packets arriving out of sequence
+- **Missing: 2 occurrences** - Small gaps in packet ID sequence
 - Likely due to TCP packet reordering (normal network behavior)
+- Within acceptable limits for TCP/IP transmission
 
 ### Reordering Feature
 
 **Planned Enhancement:** Add ability to reorder packets by SPIDR packet ID sequence.
 
+**See:** `PACKET_REORDERING_PLAN.md` for detailed implementation plan
+
 This would:
 - Buffer out-of-order packets
 - Sort by packet ID before processing
 - Ensure correct sequence for analysis
-- May require reordering window (e.g., buffer up to N packets)
+- Require reordering window (e.g., buffer up to N packets)
+- Track reordering statistics (count, max distance, delays)
 
 ## Summary
 

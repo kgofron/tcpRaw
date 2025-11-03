@@ -79,10 +79,15 @@ The enhanced test tool provides categorized violation counts:
 ### 3. Out-of-Order and Missing Packets
 
 **Latest Test Results:**
-- **Out-of-order packets:** 3 → 7 → 7 (minimal)
-- **Missing packet IDs:** 1 → 1 → 1 (negligible)
-- Both within acceptable limits (likely TCP/IP reordering)
-- **Assessment:** No significant concern ✓
+- **Out-of-order packet IDs:** 3 → 7 → 9 (increasing)
+- **Missing packet IDs:** 1 → 1 → 2 (minimal)
+- Both indicate TCP/IP packet reordering (normal network behavior)
+
+**Assessment:**
+- **Out-of-order: 9 occurrences** - Indicates packets arriving out of sequence
+- **Missing: 2 occurrences** - Small gaps in packet ID sequence
+- Within acceptable limits for TCP/IP transmission
+- Can be handled with packet reordering feature (see PACKET_REORDERING_PLAN.md)
 
 ## Protocol Questions
 
