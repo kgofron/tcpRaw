@@ -9,15 +9,21 @@ void HitProcessor::resetStatistics() {
     stats_.total_hits = 0;
     stats_.total_chunks = 0;
     stats_.total_tdc_events = 0;
+    stats_.total_tdc1_events = 0;
+    stats_.total_tdc2_events = 0;
     stats_.total_control_packets = 0;
     stats_.total_decode_errors = 0;
     stats_.total_fractional_errors = 0;
     stats_.total_unknown_packets = 0;
     stats_.packet_type_counts.clear();
     stats_.hit_rate_hz = 0.0;
+    stats_.tdc1_rate_hz = 0.0;
+    stats_.tdc2_rate_hz = 0.0;
     stats_.chip_hit_rates_hz.clear();
     last_update_time_ns_ = 0;
     hits_at_last_update_ = 0;
+    tdc1_events_at_last_update_ = 0;
+    tdc2_events_at_last_update_ = 0;
     chip_hits_at_last_update_.clear();
     calls_since_last_update_ = 0;
 }
@@ -34,8 +40,16 @@ void HitProcessor::addHit(const PixelHit& hit) {
     }
 }
 
-void HitProcessor::addTdcEvent(const TDCEvent&) {
+void HitProcessor::addTdcEvent(const TDCEvent& tdc) {
     stats_.total_tdc_events++;
+    // Track TDC1 events separately (RISE and FALL)
+    if (tdc.type == TDC1_RISE || tdc.type == TDC1_FALL) {
+        stats_.total_tdc1_events++;
+    }
+    // Track TDC2 events separately (RISE and FALL)
+    if (tdc.type == TDC2_RISE || tdc.type == TDC2_FALL) {
+        stats_.total_tdc2_events++;
+    }
 }
 
 void HitProcessor::incrementChunkCount() {
@@ -59,6 +73,8 @@ void HitProcessor::updateHitRate() {
     if (last_update_time_ns_ == 0) {
         last_update_time_ns_ = current_time_ns;
         hits_at_last_update_ = hits_.size();
+        tdc1_events_at_last_update_ = stats_.total_tdc1_events;
+        tdc2_events_at_last_update_ = stats_.total_tdc2_events;
         // Initialize per-chip counters for all chips we've seen
         for (const auto& hit : hits_) {
             chip_hits_at_last_update_[hit.chip_index] = 0;
@@ -73,6 +89,14 @@ void HitProcessor::updateHitRate() {
         // Update total hit rate
         uint64_t new_hits = hits_.size() - hits_at_last_update_;
         stats_.hit_rate_hz = new_hits / elapsed_seconds;
+        
+        // Update TDC1 rate
+        uint64_t new_tdc1_events = stats_.total_tdc1_events - tdc1_events_at_last_update_;
+        stats_.tdc1_rate_hz = new_tdc1_events / elapsed_seconds;
+        
+        // Update TDC2 rate
+        uint64_t new_tdc2_events = stats_.total_tdc2_events - tdc2_events_at_last_update_;
+        stats_.tdc2_rate_hz = new_tdc2_events / elapsed_seconds;
         
         // Update per-chip hit rates
         stats_.chip_hit_rates_hz.clear();
@@ -93,6 +117,8 @@ void HitProcessor::updateHitRate() {
         // Update last state
         last_update_time_ns_ = current_time_ns;
         hits_at_last_update_ = hits_.size();
+        tdc1_events_at_last_update_ = stats_.total_tdc1_events;
+        tdc2_events_at_last_update_ = stats_.total_tdc2_events;
         chip_hits_at_last_update_ = current_chip_hits;
     }
 }

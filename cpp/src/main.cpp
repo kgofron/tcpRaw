@@ -210,6 +210,10 @@ void print_statistics(const HitProcessor& processor) {
     std::cout << "Total unknown packets: " << stats.total_unknown_packets << std::endl;
     std::cout << "Total hit rate: " << std::fixed << std::setprecision(2) 
               << stats.hit_rate_hz << " Hz" << std::endl;
+    std::cout << "Tdc1 rate: " << std::fixed << std::setprecision(2) 
+              << stats.tdc1_rate_hz << " Hz" << std::endl;
+    std::cout << "Tdc2 rate: " << std::fixed << std::setprecision(2) 
+              << stats.tdc2_rate_hz << " Hz" << std::endl;
     
     if (!stats.packet_type_counts.empty()) {
         std::cout << "Packet type breakdown:" << std::endl;
