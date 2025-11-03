@@ -58,6 +58,15 @@ struct AnalysisStats {
     uint64_t incomplete_chunks = 0;
     uint64_t invalid_bit_patterns = 0;
     
+    // Categorized violation counts
+    uint64_t pixel_violations = 0;      // Invalid pixel packet fields
+    uint64_t tdc_violations = 0;        // Invalid TDC packet fields
+    uint64_t global_time_violations = 0; // Invalid global time packets
+    uint64_t spidr_violations = 0;      // Invalid SPIDR packets
+    uint64_t tpx3_control_violations = 0; // Invalid TPX3 control packets
+    uint64_t extra_ts_violations = 0;   // Invalid extra timestamp packets
+    uint64_t reserved_bit_violations = 0; // Reserved bits set when should be 0
+    
     // Detailed violation tracking
     std::vector<std::string> violation_details;
     size_t max_violation_details = 100;
@@ -157,6 +166,7 @@ public:
         // Bits 4-0 should be reserved/zero
         uint8_t reserved = get_bits(word, 4, 0);
         if (reserved != 0) {
+            stats.reserved_bit_violations++;
             stats.protocol_violations++;
             return false;
         }
@@ -352,28 +362,35 @@ void analyzeWord(uint64_t word, AnalysisStats& stats, bool in_chunk,
         case 0xa:
         case 0xb:
             valid = ProtocolValidator::validatePixelPacket(packet_type, word, stats);
+            if (!valid) stats.pixel_violations++;
             if (in_chunk) stats.chip_packets[chip_index]++;
             break;
         case 0x6:
             valid = ProtocolValidator::validateTdcPacket(word, stats);
+            if (!valid) stats.tdc_violations++;
             if (in_chunk) stats.chip_packets[chip_index]++;
             break;
         case 0x44:
         case 0x45:
             valid = ProtocolValidator::validateGlobalTimePacket(packet_type, word, stats);
+            if (!valid) stats.global_time_violations++;
             break;
         case 0x5:
             valid = ProtocolValidator::validateSpidrPacket(0x5, word, stats);
+            if (!valid) stats.spidr_violations++;
             break;
         default:
             // Check for special full-byte packet types
             uint8_t full_byte = (word >> 56) & 0xFF;
             if (full_byte == 0x50) {
                 valid = ProtocolValidator::validateSpidrPacket(0x50, word, stats);
+                if (!valid) stats.spidr_violations++;
             } else if (full_byte == 0x71) {
                 valid = ProtocolValidator::validateTpx3Control(word, stats);
+                if (!valid) stats.tpx3_control_violations++;
             } else if (full_byte == 0x51 || full_byte == 0x21) {
                 valid = ProtocolValidator::validateExtraTimestamp(word, stats);
+                if (!valid) stats.extra_ts_violations++;
             }
             break;
     }
@@ -449,8 +466,49 @@ void printStatistics(const AnalysisStats& stats, bool detailed = false) {
     }
     
     std::cout << "\n=== Protocol Conformance ===" << std::endl;
-    std::cout << "Protocol violations: " << stats.protocol_violations 
+    std::cout << "Total protocol violations: " << stats.protocol_violations 
               << (stats.protocol_violations > 0 ? " ⚠️" : " ✓") << std::endl;
+    
+    if (stats.protocol_violations > 0) {
+        std::cout << "\nViolation breakdown by packet type:" << std::endl;
+        if (stats.pixel_violations > 0) {
+            std::cout << "  Pixel packets (0xa, 0xb): " << stats.pixel_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.pixel_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+        if (stats.tdc_violations > 0) {
+            std::cout << "  TDC packets (0x6): " << stats.tdc_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.tdc_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+        if (stats.global_time_violations > 0) {
+            std::cout << "  Global time packets (0x44, 0x45): " << stats.global_time_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.global_time_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+        if (stats.spidr_violations > 0) {
+            std::cout << "  SPIDR packets (0x5, 0x50): " << stats.spidr_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.spidr_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+        if (stats.tpx3_control_violations > 0) {
+            std::cout << "  TPX3 control packets (0x71): " << stats.tpx3_control_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.tpx3_control_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+        if (stats.extra_ts_violations > 0) {
+            std::cout << "  Extra timestamp packets (0x51, 0x21): " << stats.extra_ts_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.extra_ts_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+        if (stats.reserved_bit_violations > 0) {
+            std::cout << "  Reserved bit violations: " << stats.reserved_bit_violations 
+                      << " (" << std::fixed << std::setprecision(1) 
+                      << (100.0 * stats.reserved_bit_violations / stats.protocol_violations) << "%)" << std::endl;
+        }
+    }
+    
+    std::cout << "\nOther issues:" << std::endl;
     std::cout << "Invalid packet types: " << stats.invalid_packet_types 
               << (stats.invalid_packet_types > 0 ? " ⚠️" : " ✓") << std::endl;
     std::cout << "Invalid chunk headers: " << stats.invalid_chunk_headers 

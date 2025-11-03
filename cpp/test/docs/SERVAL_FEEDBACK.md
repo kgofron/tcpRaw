@@ -17,42 +17,61 @@ Protocol analysis of TPX3 raw data stream reveals consistent patterns that may i
 
 ### 1. Duplicate Packet IDs (SPIDR 0x50 Packets)
 
-**Observation:**
-- Duplicate packet IDs detected in consistent pattern
-- Count grows proportionally with data received:
-  - After ~5s: 4,718 duplicates
-  - After ~10s: 9,356 duplicates  
-  - After ~15s: 13,650 duplicates
-- Ratio: ~3 duplicates per unique packet ID
+**Latest Test Results:**
+- **After ~5s:** 4,605 global duplicates, 0 within-chunk duplicates, 1 missing
+- **After ~10s:** 9,126 global duplicates, 0 within-chunk duplicates, 1 missing
+- **After ~15s:** 13,755 global duplicates, 0 within-chunk duplicates, 1 missing
+- **Ratio:** ~3 global duplicates per unique packet ID seen
+- **Missing:** 1 packet ID gap (negligible, may be TCP reordering)
 
-**Pattern:**
-- Packet IDs appear to reset at regular intervals
-- Example: Packet ID 0 appears at words 1,122, 2,242, 3,362 (every ~1,120 words)
-- Pattern repeats for IDs 1, 2, 3, etc.
+**Pattern Analysis:**
+- Packet IDs reset at chunk boundaries (confirmed by per-chunk tracking)
+- **Within-chunk duplicates: 0** ✓ (no protocol errors within chunks)
+- **Global duplicates:** High count, but appear to be expected if IDs reset per chunk
+- Example pattern: Packet ID 0 appears in multiple chunks (expected if reset)
 
-**Question:**
-Is this expected behavior? Should SPIDR packet IDs:
-- **A)** Reset per frame/chunk boundary (current behavior)?
-- **B)** Increment continuously across frames (different from current)?
+**Key Observation:**
+- The test tool now distinguishes:
+  - **Global duplicates** (across chunks): May be expected behavior
+  - **Within-chunk duplicates**: Would indicate real protocol errors (currently 0)
+
+**Question for SERVAL:**
+Is packet ID reset per chunk the intended behavior?
+- **A)** Yes, IDs reset at each chunk boundary (current behavior) ✓
+- **B)** No, IDs should increment continuously across chunks
 
 ### 2. Protocol Violations
 
-**Observation:**
-- Protocol violations detected: 12,582 → 36,402 (growing)
-- Ratio to duplicates: ~2.67 violations per duplicate
-- Suggests violations may be related to duplicate packet detection
+**Latest Test Results:**
+- **After ~5s:** 12,282 total violations
+- **After ~10s:** 24,336 total violations  
+- **After ~15s:** 36,682 total violations
+- **Growth rate:** ~2.44 violations per second
+- **Ratio to global duplicates:** ~2.67 violations per global duplicate
 
-**Need Clarification:**
-- What specific violations are occurring?
-- Are violations related to duplicate packet IDs?
-- Are there other protocol conformance issues?
+**Breakdown by Packet Type:**
+The enhanced test tool now provides categorized violation counts showing:
+- Pixel packet violations (0xa, 0xb): Invalid PixAddr, ToA/ToT, FToA ranges
+- TDC packet violations (0x6): Invalid event types, trigger counts, fractional timestamps, reserved bits
+- SPIDR packet violations (0x5, 0x50): Invalid commands, headers
+- Global time violations (0x44, 0x45): Header mismatches, reserved bits
+- TPX3 control violations (0x71): Invalid commands
+- Extra timestamp violations (0x51, 0x21): Invalid headers
+- Reserved bit violations: Bits that should be zero but are set
 
-### 3. Out-of-Order Packets
+**Latest Analysis Needs:**
+- Run enhanced test tool to identify which category dominates
+- Determine if violations correlate with global duplicate packet IDs
+- Check if violations are actual protocol errors or false positives
+- **Action Required:** Re-run test with enhanced categorization to identify root cause
 
-**Observation:**
-- Minimal out-of-order packets: 3-4 total
-- Likely due to TCP/IP packet reordering (normal)
-- Not a significant concern
+### 3. Out-of-Order and Missing Packets
+
+**Latest Test Results:**
+- **Out-of-order packets:** 3 → 7 → 7 (minimal)
+- **Missing packet IDs:** 1 → 1 → 1 (negligible)
+- Both within acceptable limits (likely TCP/IP reordering)
+- **Assessment:** No significant concern ✓
 
 ## Protocol Questions
 
@@ -128,12 +147,23 @@ Is this expected behavior? Should SPIDR packet IDs:
 
 ## Test Tool Capabilities
 
-The protocol analysis tool can provide:
-- Detailed packet ID sequence analysis
-- Per-frame/chunk packet ID tracking (if protocol clarified)
-- Specific protocol violation details
-- Bit-level field validation
-- Per-chip statistics
+The enhanced protocol analysis tool provides:
+- **Detailed packet ID sequence analysis:**
+  - Global tracking (across all chunks)
+  - Per-chunk tracking (within each chunk)
+  - Distinguishes expected resets from real errors
+- **Categorized protocol violation analysis:**
+  - Breakdown by packet type (pixel, TDC, SPIDR, etc.)
+  - Reserved bit violation tracking
+  - Violation percentages per category
+- **Bit-level field validation:**
+  - All packet types validated against specification
+  - Range checking for all fields
+  - Reserved bit validation
+- **Per-chip statistics:**
+  - Chunk counts per chip
+  - Packet counts per chip
+  - Hit rate analysis
 
 ## Recommendations
 
@@ -166,9 +196,10 @@ The protocol analysis tool can provide:
    - Reduce false positive violations
 
 2. **Detailed Violation Analysis:**
-   - Log specific violation types (not just counts)
-   - Identify which protocol rules are being violated
-   - Determine if violations are critical
+   - ✅ **COMPLETED:** Test tool now categorizes violations by packet type
+   - ✅ **COMPLETED:** Shows violation percentages per category
+   - **Next:** Run enhanced tool to identify which specific violations dominate
+   - **Next:** Analyze if violations correlate with duplicate packet IDs
 
 3. **Protocol Documentation:**
    - Complete protocol specification
