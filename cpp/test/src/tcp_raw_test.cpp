@@ -243,8 +243,11 @@ void analyzeWord(uint64_t word, AnalysisStats& stats, bool in_chunk,
                  size_t /*chunk_words_remaining*/, uint8_t chip_index) {
     stats.total_words++;
     
-    // Extract packet type
+    // Extract packet type (lower 4 bits of upper byte)
     uint8_t packet_type = (word >> 60) & 0xF;
+    
+    // For full-byte packet types (0x50, 0x44, 0x45, etc.), check full byte first
+    uint8_t full_byte_type = (word >> 56) & 0xFF;
     
     // Check if this is a chunk header
     TPX3ChunkHeader header;
@@ -273,7 +276,7 @@ void analyzeWord(uint64_t word, AnalysisStats& stats, bool in_chunk,
     // Check packet type validity
     if (!ProtocolValidator::validatePacketType(packet_type, word)) {
         // Also check full-byte packet types for special cases
-        uint8_t full_byte_type = (word >> 56) & 0xFF;
+        // Note: full_byte_type already extracted above
         if (full_byte_type != 0x21 && full_byte_type != 0x44 && full_byte_type != 0x45 && 
             full_byte_type != 0x50 && full_byte_type != 0x51 && full_byte_type != 0x71) {
             stats.invalid_packet_types++;
@@ -376,21 +379,36 @@ void analyzeWord(uint64_t word, AnalysisStats& stats, bool in_chunk,
             if (!valid) stats.global_time_violations++;
             break;
         case 0x5:
-            valid = ProtocolValidator::validateSpidrPacket(0x5, word, stats);
-            if (!valid) stats.spidr_violations++;
+            // Packet type 0x5 could be SPIDR control (0x5) OR SPIDR packet ID (0x50)
+            // Check full byte to distinguish
+            if (full_byte_type == 0x50) {
+                // This is SPIDR packet ID (0x50), not control (0x5)
+                valid = ProtocolValidator::validateSpidrPacket(0x50, word, stats);
+                if (!valid) stats.spidr_violations++;
+            } else {
+                // This is SPIDR control (0x5)
+                valid = ProtocolValidator::validateSpidrPacket(0x5, word, stats);
+                if (!valid) stats.spidr_violations++;
+            }
             break;
         default:
             // Check for special full-byte packet types
-            uint8_t full_byte = (word >> 56) & 0xFF;
-            if (full_byte == 0x50) {
+            if (full_byte_type == 0x50) {
+                // 0x50 is SPIDR packet ID - validate it
                 valid = ProtocolValidator::validateSpidrPacket(0x50, word, stats);
                 if (!valid) stats.spidr_violations++;
-            } else if (full_byte == 0x71) {
+                // Note: 0x50 packets are also tracked for duplicate detection above
+                // Duplicate detection is separate from protocol violations
+            } else if (full_byte_type == 0x71) {
                 valid = ProtocolValidator::validateTpx3Control(word, stats);
                 if (!valid) stats.tpx3_control_violations++;
-            } else if (full_byte == 0x51 || full_byte == 0x21) {
+            } else if (full_byte_type == 0x51 || full_byte_type == 0x21) {
                 valid = ProtocolValidator::validateExtraTimestamp(word, stats);
                 if (!valid) stats.extra_ts_violations++;
+            } else if (full_byte_type == 0x44 || full_byte_type == 0x45) {
+                // Global time packets - already handled above but double-check
+                valid = ProtocolValidator::validateGlobalTimePacket(packet_type, word, stats);
+                if (!valid) stats.global_time_violations++;
             }
             break;
     }

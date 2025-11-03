@@ -43,27 +43,38 @@ Is packet ID reset per chunk the intended behavior?
 ### 2. Protocol Violations
 
 **Latest Test Results:**
-- **After ~5s:** 12,282 total violations
-- **After ~10s:** 24,336 total violations  
-- **After ~15s:** 36,682 total violations
-- **Growth rate:** ~2.44 violations per second
+- **Total violations:** 60,198
+- **SPIDR packet violations:** 30,099 (50.0% of total)
 - **Ratio to global duplicates:** ~2.67 violations per global duplicate
 
+**Important Clarification:**
+- **Protocol violations are SEPARATE from duplicate packet IDs**
+- Duplicate packet IDs are tracked separately and NOT counted as violations
+- Protocol violations check packet STRUCTURE and FIELD conformance to specification
+
 **Breakdown by Packet Type:**
-The enhanced test tool now provides categorized violation counts showing:
+The enhanced test tool provides categorized violation counts:
+- **SPIDR packets (0x5, 0x50):** 30,099 (50.0%) - Dominates violations
+  - 0x5 (SPIDR control): Validates header bits 63-60 = 0x5, command in {0xf, 0xa, 0xc}
+  - 0x50 (SPIDR packet ID): Validates header bits 63-56 = exactly 0x50
 - Pixel packet violations (0xa, 0xb): Invalid PixAddr, ToA/ToT, FToA ranges
 - TDC packet violations (0x6): Invalid event types, trigger counts, fractional timestamps, reserved bits
-- SPIDR packet violations (0x5, 0x50): Invalid commands, headers
 - Global time violations (0x44, 0x45): Header mismatches, reserved bits
 - TPX3 control violations (0x71): Invalid commands
 - Extra timestamp violations (0x51, 0x21): Invalid headers
 - Reserved bit violations: Bits that should be zero but are set
 
-**Latest Analysis Needs:**
-- Run enhanced test tool to identify which category dominates
-- Determine if violations correlate with global duplicate packet IDs
-- Check if violations are actual protocol errors or false positives
-- **Action Required:** Re-run test with enhanced categorization to identify root cause
+**Critical Question:**
+**SPIDR packets account for 50% of all protocol violations.**
+- Are these false positives (validation too strict)?
+- OR are SPIDR packets actually violating the protocol?
+- **Need to check actual failing packet data to determine**
+
+**Investigation Needed:**
+1. Examine actual SPIDR packet data that fails validation
+2. Verify if validation logic matches SERVAL protocol specification
+3. Check if there are firmware-specific behaviors not accounted for
+4. Determine if violations indicate real protocol errors or validation bugs
 
 ### 3. Out-of-Order and Missing Packets
 
