@@ -47,3 +47,7 @@ python/
 bin/
 O.Common/
 O.linux-x86_64/
+
+# Protocol study
+comparison_results*
+cpp/test/results/

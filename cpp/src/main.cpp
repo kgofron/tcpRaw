@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <string>
 #include <bitset>
+#include <chrono>
 
 // Process raw data buffer
 void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, ChunkMetadata& chunk_meta) {
@@ -213,9 +214,24 @@ void print_recent_hits(const HitProcessor& processor, size_t count) {
     }
 }
 
-int main(int /*argc*/, char* /*argv*/[]) {
+int main(int argc, char* argv[]) {
     const char* host = "127.0.0.1";
     uint16_t port = 8085;
+    
+    // Parse command line arguments for host and port
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--host" && i + 1 < argc) {
+            host = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            port = static_cast<uint16_t>(std::stoul(argv[++i]));
+        } else if (arg == "--help") {
+            std::cout << "Usage: " << argv[0] << " [--host HOST] [--port PORT]" << std::endl;
+            std::cout << "  --host HOST    TCP server host (default: 127.0.0.1)" << std::endl;
+            std::cout << "  --port PORT    TCP server port (default: 8085)" << std::endl;
+            return 0;
+        }
+    }
     
     std::cout << "TPX3 Raw Data Parser" << std::endl;
     std::cout << "Connecting to " << host << ":" << port << std::endl;
@@ -228,6 +244,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     }
     
     std::cout << "TCP client initialized, connecting to server..." << std::endl;
+    std::cout << "Statistics will be printed every 1000 packets processed\n" << std::endl;
     
     HitProcessor processor;
     ChunkMetadata chunk_meta;
@@ -235,11 +252,15 @@ int main(int /*argc*/, char* /*argv*/[]) {
     size_t print_counter = 0;
     const size_t PRINT_INTERVAL = 1000;
     
-    server.setConnectionCallback([](bool connected) {
+    auto last_status_print = std::chrono::steady_clock::now();
+    uint64_t last_hits = 0;
+    
+    server.setConnectionCallback([&](bool connected) {
         if (connected) {
-            std::cout << "Client connected" << std::endl;
+            std::cout << "✓ Client connected to server" << std::endl;
+            std::cout << "Waiting for data...\n" << std::endl;
         } else {
-            std::cout << "Client disconnected" << std::endl;
+            std::cout << "✗ Client disconnected" << std::endl;
         }
     });
     
@@ -250,8 +271,22 @@ int main(int /*argc*/, char* /*argv*/[]) {
         // Print periodic statistics
         print_counter += (size / 8);
         if (print_counter >= PRINT_INTERVAL) {
+            std::cout << "\n[Periodic Statistics Update]" << std::endl;
             print_statistics(processor);
+            std::cout << std::endl;
             print_counter = 0;
+        }
+        
+        // Also print status every 10 seconds
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            now - last_status_print).count();
+        if (elapsed >= 10) {
+            const Statistics& stats = processor.getStatistics();
+            uint64_t hits_diff = stats.total_hits - last_hits;
+            std::cout << "[Status] Processed " << hits_diff << " hits in last 10s" << std::endl;
+            last_hits = stats.total_hits;
+            last_status_print = now;
         }
     });
     

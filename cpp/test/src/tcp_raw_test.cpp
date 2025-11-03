@@ -377,30 +377,47 @@ void printStatistics(const AnalysisStats& stats, bool detailed = false) {
     std::cout << "\n=== Packet Statistics ===" << std::endl;
     std::cout << "Total chunks: " << stats.total_chunks << std::endl;
     std::cout << "Packet type breakdown:" << std::endl;
-    for (const auto& pair : stats.packet_type_counts) {
-        uint8_t type = pair.first;
-        uint64_t count = pair.second;
-        double percentage = (stats.total_words > 0) ? (count * 100.0 / stats.total_words) : 0.0;
-        std::cout << "  Type 0x" << std::hex << static_cast<int>(type) << std::dec
-                  << " (0b" << std::bitset<4>(type) << "): " << count 
-                  << " (" << std::fixed << std::setprecision(2) << percentage << "%)" << std::endl;
+    if (stats.packet_type_counts.empty()) {
+        std::cout << "  (no packets processed yet)" << std::endl;
+    } else {
+        for (const auto& pair : stats.packet_type_counts) {
+            uint8_t type = pair.first;
+            uint64_t count = pair.second;
+            double percentage = (stats.total_words > 0) ? (count * 100.0 / stats.total_words) : 0.0;
+            std::cout << "  Type 0x" << std::hex << static_cast<int>(type) << std::dec
+                      << " (0b" << std::bitset<4>(type) << "): " << count 
+                      << " (" << std::fixed << std::setprecision(2) << percentage << "%)" << std::endl;
+        }
     }
     
     std::cout << "\n=== Packet Order Analysis ===" << std::endl;
-    std::cout << "SPIDR packet IDs seen: " << stats.seen_packet_ids.size() << std::endl;
-    std::cout << "Missing packet IDs: " << stats.missing_packet_ids << std::endl;
-    std::cout << "Duplicate packet IDs: " << stats.duplicate_packet_ids << std::endl;
-    std::cout << "Out-of-order packet IDs: " << stats.out_of_order_packet_ids << std::endl;
-    if (stats.first_packet_id_seen) {
-        std::cout << "Last packet ID: " << stats.last_packet_id << std::endl;
+    if (stats.seen_packet_ids.empty()) {
+        std::cout << "No SPIDR packet ID packets found (0x50 packets)" << std::endl;
+    } else {
+        std::cout << "SPIDR packet IDs seen: " << stats.seen_packet_ids.size() << std::endl;
+        std::cout << "Missing packet IDs: " << stats.missing_packet_ids 
+                  << (stats.missing_packet_ids > 0 ? " ⚠️" : " ✓") << std::endl;
+        std::cout << "Duplicate packet IDs: " << stats.duplicate_packet_ids 
+                  << (stats.duplicate_packet_ids > 0 ? " ⚠️" : " ✓") << std::endl;
+        std::cout << "Out-of-order packet IDs: " << stats.out_of_order_packet_ids 
+                  << (stats.out_of_order_packet_ids > 0 ? " ⚠️" : " ✓") << std::endl;
+        if (stats.first_packet_id_seen) {
+            std::cout << "Last packet ID: " << stats.last_packet_id << std::endl;
+            std::cout << "Expected next ID: " << (stats.last_packet_id + 1) << std::endl;
+        }
     }
     
     std::cout << "\n=== Protocol Conformance ===" << std::endl;
-    std::cout << "Protocol violations: " << stats.protocol_violations << std::endl;
-    std::cout << "Invalid packet types: " << stats.invalid_packet_types << std::endl;
-    std::cout << "Invalid chunk headers: " << stats.invalid_chunk_headers << std::endl;
-    std::cout << "Invalid chunk sizes: " << stats.invalid_chunk_sizes << std::endl;
-    std::cout << "Buffer overruns: " << stats.buffer_overruns << std::endl;
+    std::cout << "Protocol violations: " << stats.protocol_violations 
+              << (stats.protocol_violations > 0 ? " ⚠️" : " ✓") << std::endl;
+    std::cout << "Invalid packet types: " << stats.invalid_packet_types 
+              << (stats.invalid_packet_types > 0 ? " ⚠️" : " ✓") << std::endl;
+    std::cout << "Invalid chunk headers: " << stats.invalid_chunk_headers 
+              << (stats.invalid_chunk_headers > 0 ? " ⚠️" : " ✓") << std::endl;
+    std::cout << "Invalid chunk sizes: " << stats.invalid_chunk_sizes 
+              << (stats.invalid_chunk_sizes > 0 ? " ⚠️" : " ✓") << std::endl;
+    std::cout << "Buffer overruns: " << stats.buffer_overruns 
+              << (stats.buffer_overruns > 0 ? " ⚠️" : " ✓") << std::endl;
     
     if (!stats.chip_chunks.empty()) {
         std::cout << "\n=== Per-Chip Statistics ===" << std::endl;
@@ -579,8 +596,12 @@ int main(int argc, char* argv[]) {
     }
     
     std::cout << "Connected. Starting data collection..." << std::endl;
+    std::cout << "Statistics will be printed every " << stats_interval << " seconds" << std::endl;
+    std::cout << "Press Ctrl+C to stop early\n" << std::endl;
     
     auto last_print = std::chrono::steady_clock::now();
+    auto last_data_check = std::chrono::steady_clock::now();
+    uint64_t last_bytes = 0;
     
     server.run([&](const uint8_t* data, size_t size) {
         // Check duration
@@ -614,13 +635,34 @@ int main(int argc, char* argv[]) {
         // Print periodic statistics
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_print).count();
+        
+        // Print statistics at regular intervals
         if (elapsed >= static_cast<int>(stats_interval)) {
+            std::cout << "\n[Periodic Statistics Update]" << std::endl;
             printStatistics(stats, detailed_analysis);
+            std::cout << std::endl;
             last_print = now;
+        }
+        
+        // Also print a brief status if data is being received
+        auto data_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_data_check).count();
+        if (data_elapsed >= 10000) {  // Every 10 seconds
+            if (stats.total_bytes > last_bytes) {
+                uint64_t bytes_diff = stats.total_bytes - last_bytes;
+                double mbps = (bytes_diff * 8.0) / (data_elapsed / 1000.0) / 1e6;
+                std::cout << "[Status] Received " << bytes_diff << " bytes in last 10s (~" 
+                          << std::fixed << std::setprecision(2) << mbps << " Mbps)" << std::endl;
+                last_bytes = stats.total_bytes;
+            } else {
+                std::cout << "[Warning] No data received in last 10 seconds" << std::endl;
+            }
+            last_data_check = now;
         }
     });
     
-    // Final statistics
+    std::cout << "\n=== Final Statistics ===" << std::endl;
+    std::cout << "Data collection completed.\n" << std::endl;
     printStatistics(stats, true);
     
     // Cleanup
