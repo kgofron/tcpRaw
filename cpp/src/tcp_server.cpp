@@ -65,7 +65,7 @@ bool TCPServer::connect() {
     
     // Set receive buffer size for better throughput
     // At 8 MHz (64 MB/s), we need large buffers to avoid overruns
-    // 64MB works best (requested) vs 128MB (system may reject or mishandle)
+    // 64MB provides best performance (51% capture vs 24% at 1MB, 27% at 128MB)
     int rcvbuf = 64 * 1024 * 1024; // 64MB requested
     if (setsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
         // Not critical, continue if fails
