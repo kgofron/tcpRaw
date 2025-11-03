@@ -152,8 +152,17 @@ void print_statistics(const HitProcessor& processor) {
     std::cout << "Total hits: " << stats.total_hits << std::endl;
     std::cout << "Total chunks: " << stats.total_chunks << std::endl;
     std::cout << "Total TDC events: " << stats.total_tdc_events << std::endl;
-    std::cout << "Hit rate: " << std::fixed << std::setprecision(2) 
+    std::cout << "Total hit rate: " << std::fixed << std::setprecision(2) 
               << stats.hit_rate_hz << " Hz" << std::endl;
+    
+    if (!stats.chip_hit_rates_hz.empty()) {
+        std::cout << "Per-chip hit rates:" << std::endl;
+        for (const auto& pair : stats.chip_hit_rates_hz) {
+            std::cout << "  Chip " << static_cast<int>(pair.first) 
+                      << ": " << std::fixed << std::setprecision(2) 
+                      << pair.second << " Hz" << std::endl;
+        }
+    }
 }
 
 void print_recent_hits(const HitProcessor& processor, size_t count) {

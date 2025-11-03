@@ -11,13 +11,23 @@ void HitProcessor::resetStatistics() {
     stats_.total_tdc_events = 0;
     stats_.total_control_packets = 0;
     stats_.hit_rate_hz = 0.0;
+    stats_.chip_hit_rates_hz.clear();
     last_update_time_ns_ = 0;
+    hits_at_last_update_ = 0;
+    chip_hits_at_last_update_.clear();
+    calls_since_last_update_ = 0;
 }
 
 void HitProcessor::addHit(const PixelHit& hit) {
     hits_.push_back(hit);
     stats_.total_hits++;
-    updateHitRate();
+    
+    // Only update hit rate every 1000 hits to reduce overhead
+    calls_since_last_update_++;
+    if (calls_since_last_update_ >= 1000) {
+        updateHitRate();
+        calls_since_last_update_ = 0;
+    }
 }
 
 void HitProcessor::addTdcEvent(const TDCEvent&) {
@@ -44,14 +54,42 @@ void HitProcessor::updateHitRate() {
     
     if (last_update_time_ns_ == 0) {
         last_update_time_ns_ = current_time_ns;
+        hits_at_last_update_ = hits_.size();
+        // Initialize per-chip counters for all chips we've seen
+        for (const auto& hit : hits_) {
+            chip_hits_at_last_update_[hit.chip_index] = 0;
+        }
         return;
     }
     
     uint64_t elapsed_ns = current_time_ns - last_update_time_ns_;
     if (elapsed_ns > 1'000'000'000) { // Update every second
         double elapsed_seconds = elapsed_ns / 1e9;
-        stats_.hit_rate_hz = hits_.size() / elapsed_seconds;
+        
+        // Update total hit rate
+        uint64_t new_hits = hits_.size() - hits_at_last_update_;
+        stats_.hit_rate_hz = new_hits / elapsed_seconds;
+        
+        // Update per-chip hit rates
+        stats_.chip_hit_rates_hz.clear();
+        std::map<uint8_t, uint64_t> current_chip_hits;
+        for (const auto& hit : hits_) {
+            current_chip_hits[hit.chip_index]++;
+        }
+        
+        for (const auto& pair : current_chip_hits) {
+            uint8_t chip = pair.first;
+            uint64_t current_count = pair.second;
+            uint64_t last_count = chip_hits_at_last_update_.count(chip) 
+                ? chip_hits_at_last_update_[chip] : 0;
+            uint64_t new_chip_hits = current_count - last_count;
+            stats_.chip_hit_rates_hz[chip] = new_chip_hits / elapsed_seconds;
+        }
+        
+        // Update last state
         last_update_time_ns_ = current_time_ns;
+        hits_at_last_update_ = hits_.size();
+        chip_hits_at_last_update_ = current_chip_hits;
     }
 }
 

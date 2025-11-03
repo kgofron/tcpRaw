@@ -86,10 +86,14 @@ TDCEvent decode_tdc_data(uint64_t data) {
     // Timestamp (bits 43-9) in 3.125ns units
     uint64_t tdc_coarse = get_bits(data, 43, 9);
     
-    // Fine timestamp (bits 8-5), values 1-12
+    // Fine timestamp (bits 8-5), values 1-12 (but 0 seen on old firmware)
     uint8_t fract = get_bits(data, 8, 5);
     
-    if (fract == 0 || fract > 12) {
+    // Bug: fract is sometimes 0 for older firmware but it should be 1 <= fract <= 12
+    // Python assert treats 0 as an error, but we'll accept it and treat as 1
+    if (fract == 0) {
+        fract = 1;  // Handle old firmware bug
+    } else if (fract > 12) {
         throw std::runtime_error("Invalid fractional TDC part: " + std::to_string(fract));
     }
     
