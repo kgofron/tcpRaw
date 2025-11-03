@@ -42,7 +42,7 @@ TEST_PID=$!
 sleep 1
 
 echo "Starting real-time parser on port ${PARSER_PORT}..."
-timeout ${DURATION} ${PARSER_TOOL} --host 127.0.0.1 --port ${PARSER_PORT} > "$PARSER_OUTPUT" 2>&1 &
+timeout ${DURATION} ${PARSER_TOOL} --host 127.0.0.1 --port ${PARSER_PORT} --reorder > "$PARSER_OUTPUT" 2>&1 &
 PARSER_PID=$!
 
 echo "Both tools started (PIDs: $TEST_PID, $PARSER_PID)"

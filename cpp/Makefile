@@ -27,7 +27,7 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 # Link
-$(TARGET): $(BUILD_DIR)/main.o $(BUILD_DIR)/hit_processor.o $(BUILD_DIR)/tcp_server.o $(BUILD_DIR)/timestamp_extension.o $(BUILD_DIR)/tpx3_decoder.o $(BUILD_DIR)/ring_buffer.o | $(BIN_DIR)
+$(TARGET): $(BUILD_DIR)/main.o $(BUILD_DIR)/hit_processor.o $(BUILD_DIR)/tcp_server.o $(BUILD_DIR)/timestamp_extension.o $(BUILD_DIR)/tpx3_decoder.o $(BUILD_DIR)/ring_buffer.o $(BUILD_DIR)/packet_reorder_buffer.o | $(BIN_DIR)
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
 # Test program (uses different sources)
