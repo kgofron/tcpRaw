@@ -72,7 +72,7 @@ void HitProcessor::updateHitRate() {
     
     if (last_update_time_ns_ == 0) {
         last_update_time_ns_ = current_time_ns;
-        hits_at_last_update_ = hits_.size();
+        hits_at_last_update_ = stats_.total_hits;  // Use stats_.total_hits instead of hits_.size()
         tdc1_events_at_last_update_ = stats_.total_tdc1_events;
         tdc2_events_at_last_update_ = stats_.total_tdc2_events;
         // Initialize per-chip counters for all chips we've seen
@@ -86,8 +86,8 @@ void HitProcessor::updateHitRate() {
     if (elapsed_ns > 1'000'000'000) { // Update every second
         double elapsed_seconds = elapsed_ns / 1e9;
         
-        // Update total hit rate
-        uint64_t new_hits = hits_.size() - hits_at_last_update_;
+        // Update total hit rate using stats_.total_hits (more reliable than hits_.size())
+        uint64_t new_hits = stats_.total_hits - hits_at_last_update_;
         stats_.hit_rate_hz = new_hits / elapsed_seconds;
         
         // Update TDC1 rate
@@ -116,7 +116,7 @@ void HitProcessor::updateHitRate() {
         
         // Update last state
         last_update_time_ns_ = current_time_ns;
-        hits_at_last_update_ = hits_.size();
+        hits_at_last_update_ = stats_.total_hits;  // Use stats_.total_hits instead of hits_.size()
         tdc1_events_at_last_update_ = stats_.total_tdc1_events;
         tdc2_events_at_last_update_ = stats_.total_tdc2_events;
         chip_hits_at_last_update_ = current_chip_hits;

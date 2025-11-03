@@ -133,6 +133,9 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         
         if (header.isValid()) {
             // Found chunk header
+            // Note: chunk size includes the header word itself
+            // So we set chunk_words_remaining to chunkSize/8, which includes header
+            // We then continue to skip the header, so we process (chunkSize/8 - 1) data words
             in_chunk = true;
             chunk_words_remaining = header.chunkSize() / 8;
             chip_index = header.chipIndex();
