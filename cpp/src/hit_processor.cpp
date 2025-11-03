@@ -19,7 +19,11 @@ void HitProcessor::resetStatistics() {
     stats_.hit_rate_hz = 0.0;
     stats_.tdc1_rate_hz = 0.0;
     stats_.tdc2_rate_hz = 0.0;
+    stats_.cumulative_hit_rate_hz = 0.0;
+    stats_.cumulative_tdc1_rate_hz = 0.0;
+    stats_.cumulative_tdc2_rate_hz = 0.0;
     stats_.chip_hit_rates_hz.clear();
+    start_time_ns_ = 0;  // Will be initialized on first hit to exclude idle time
     last_update_time_ns_ = 0;
     hits_at_last_update_ = 0;
     tdc1_events_at_last_update_ = 0;
@@ -31,6 +35,17 @@ void HitProcessor::resetStatistics() {
 void HitProcessor::addHit(const PixelHit& hit) {
     hits_.push_back(hit);
     stats_.total_hits++;
+    
+    // Initialize start_time_ns_ on first hit (exclude idle time before data starts)
+    if (start_time_ns_ == 0) {
+        auto now = std::chrono::steady_clock::now();
+        start_time_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count();
+        last_update_time_ns_ = start_time_ns_;
+        hits_at_last_update_ = 0;
+        tdc1_events_at_last_update_ = 0;
+        tdc2_events_at_last_update_ = 0;
+    }
     
     // Only update hit rate every 1000 hits to reduce overhead
     calls_since_last_update_++;
@@ -70,7 +85,20 @@ void HitProcessor::updateHitRate() {
     uint64_t current_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
     
-    if (last_update_time_ns_ == 0) {
+    // Calculate cumulative rates based on total elapsed time (only if we've started)
+    if (start_time_ns_ > 0) {
+        uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
+        if (total_elapsed_ns > 0) {
+            double total_elapsed_seconds = total_elapsed_ns / 1e9;
+            
+            // Cumulative average rates (total counts / total elapsed time)
+            stats_.cumulative_hit_rate_hz = stats_.total_hits / total_elapsed_seconds;
+            stats_.cumulative_tdc1_rate_hz = stats_.total_tdc1_events / total_elapsed_seconds;
+            stats_.cumulative_tdc2_rate_hz = stats_.total_tdc2_events / total_elapsed_seconds;
+        }
+    }
+    
+    if (last_update_time_ns_ == 0 || last_update_time_ns_ == start_time_ns_) {
         last_update_time_ns_ = current_time_ns;
         hits_at_last_update_ = stats_.total_hits;  // Use stats_.total_hits instead of hits_.size()
         tdc1_events_at_last_update_ = stats_.total_tdc1_events;
@@ -86,7 +114,7 @@ void HitProcessor::updateHitRate() {
     if (elapsed_ns > 1'000'000'000) { // Update every second
         double elapsed_seconds = elapsed_ns / 1e9;
         
-        // Update total hit rate using stats_.total_hits (more reliable than hits_.size())
+        // Update instant rates (rolling average over ~1s window)
         uint64_t new_hits = stats_.total_hits - hits_at_last_update_;
         stats_.hit_rate_hz = new_hits / elapsed_seconds;
         

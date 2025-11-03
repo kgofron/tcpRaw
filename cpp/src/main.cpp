@@ -203,7 +203,21 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
 
 void print_statistics(const HitProcessor& processor) {
     const Statistics& stats = processor.getStatistics();
+    
+    // Calculate elapsed time for display
+    auto now = std::chrono::steady_clock::now();
+    // Note: We can't access start_time_ns_ directly, so we'll estimate from cumulative rate
+    // or just show that cumulative rate is calculated from first hit
+    double elapsed_seconds = 0.0;
+    if (stats.cumulative_hit_rate_hz > 0.0) {
+        elapsed_seconds = stats.total_hits / stats.cumulative_hit_rate_hz;
+    }
+    
     std::cout << "\n=== Statistics ===" << std::endl;
+    if (elapsed_seconds > 0.0) {
+        std::cout << "Elapsed time: " << std::fixed << std::setprecision(1) 
+                  << elapsed_seconds << " s (" << (elapsed_seconds / 60.0) << " min)" << std::endl;
+    }
     std::cout << "Total hits: " << stats.total_hits << std::endl;
     std::cout << "Total chunks: " << stats.total_chunks << std::endl;
     std::cout << "Total TDC events: " << stats.total_tdc_events << std::endl;
@@ -211,12 +225,18 @@ void print_statistics(const HitProcessor& processor) {
     std::cout << "Total decode errors: " << stats.total_decode_errors << std::endl;
     std::cout << "Total fractional errors: " << stats.total_fractional_errors << std::endl;
     std::cout << "Total unknown packets: " << stats.total_unknown_packets << std::endl;
-    std::cout << "Total hit rate: " << std::fixed << std::setprecision(2) 
+    std::cout << "Hit rate (instant): " << std::fixed << std::setprecision(2) 
               << stats.hit_rate_hz << " Hz" << std::endl;
-    std::cout << "Tdc1 rate: " << std::fixed << std::setprecision(2) 
+    std::cout << "Hit rate (cumulative avg): " << std::fixed << std::setprecision(2) 
+              << stats.cumulative_hit_rate_hz << " Hz" << std::endl;
+    std::cout << "Tdc1 rate (instant): " << std::fixed << std::setprecision(2) 
               << stats.tdc1_rate_hz << " Hz" << std::endl;
-    std::cout << "Tdc2 rate: " << std::fixed << std::setprecision(2) 
+    std::cout << "Tdc1 rate (cumulative avg): " << std::fixed << std::setprecision(2) 
+              << stats.cumulative_tdc1_rate_hz << " Hz" << std::endl;
+    std::cout << "Tdc2 rate (instant): " << std::fixed << std::setprecision(2) 
               << stats.tdc2_rate_hz << " Hz" << std::endl;
+    std::cout << "Tdc2 rate (cumulative avg): " << std::fixed << std::setprecision(2) 
+              << stats.cumulative_tdc2_rate_hz << " Hz" << std::endl;
     
     if (!stats.packet_type_counts.empty()) {
         std::cout << "Packet type breakdown:" << std::endl;

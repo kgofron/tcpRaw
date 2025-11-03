@@ -17,9 +17,12 @@ struct Statistics {
     uint64_t total_fractional_errors;  // TDC fractional timestamp errors
     uint64_t total_unknown_packets;    // Packets with unknown type
     std::map<uint8_t, uint64_t> packet_type_counts;  // Count of packets by type
-    double hit_rate_hz;  // Total hits per second
-    double tdc1_rate_hz;  // TDC1 events per second
-    double tdc2_rate_hz;  // TDC2 events per second
+    double hit_rate_hz;  // Instant hit rate (rolling average over ~1s window)
+    double tdc1_rate_hz;  // Instant TDC1 rate (rolling average over ~1s window)
+    double tdc2_rate_hz;  // Instant TDC2 rate (rolling average over ~1s window)
+    double cumulative_hit_rate_hz;  // Cumulative average: total_hits / elapsed_time
+    double cumulative_tdc1_rate_hz;  // Cumulative average: total_tdc1_events / elapsed_time
+    double cumulative_tdc2_rate_hz;  // Cumulative average: total_tdc2_events / elapsed_time
     std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
 };
 
@@ -45,6 +48,7 @@ public:
 private:
     std::vector<PixelHit> hits_;
     Statistics stats_;
+    uint64_t start_time_ns_;  // Time when statistics started (for cumulative rates)
     uint64_t last_update_time_ns_;
     uint64_t hits_at_last_update_;
     uint64_t tdc1_events_at_last_update_;
