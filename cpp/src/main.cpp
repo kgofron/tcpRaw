@@ -339,7 +339,22 @@ int main(int argc, char* argv[]) {
         }
     });
     
+    uint64_t total_bytes_received = 0;
+    uint64_t total_packets_received = 0;
+    auto first_data_time = std::chrono::steady_clock::now();
+    bool first_data_received = false;
+    
     server.run([&](const uint8_t* data, size_t size) {
+        // Track first data received
+        if (!first_data_received) {
+            first_data_received = true;
+            first_data_time = std::chrono::steady_clock::now();
+            std::cout << "[TCP] First data received: " << size << " bytes" << std::endl;
+        }
+        
+        total_bytes_received += size;
+        total_packets_received += (size / 8);
+        
         // Process raw data
         process_raw_data(data, size, processor, chunk_meta, 
                         reorder_buffer ? reorder_buffer.get() : nullptr, 0);
@@ -361,14 +376,42 @@ int main(int argc, char* argv[]) {
             const Statistics& stats = processor.getStatistics();
             uint64_t hits_diff = stats.total_hits - last_hits;
             std::cout << "[Status] Processed " << hits_diff << " hits in last 10s" << std::endl;
+            std::cout << "[Status] Total bytes received: " << total_bytes_received 
+                      << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+            std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
             last_hits = stats.total_hits;
             last_status_print = now;
         }
     });
     
+    // Print summary if no data was received
+    if (!first_data_received) {
+        std::cout << "\n[WARNING] No data was received from SERVAL!" << std::endl;
+        std::cout << "Possible causes:" << std::endl;
+        std::cout << "  1. SERVAL is not configured to send data to port " << port << std::endl;
+        std::cout << "  2. SERVAL is not actively sending data" << std::endl;
+        std::cout << "  3. Check SERVAL configuration and status" << std::endl;
+    }
+    
     // Print final statistics
     print_statistics(processor);
     print_recent_hits(processor, 10);
+    
+    // Print connection statistics
+    const auto& conn_stats = server.getConnectionStats();
+    std::cout << "\n=== Connection Statistics ===" << std::endl;
+    std::cout << "Connection attempts: " << conn_stats.connection_attempts << std::endl;
+    std::cout << "Successful connections: " << conn_stats.successful_connections << std::endl;
+    std::cout << "Disconnections: " << conn_stats.disconnections << std::endl;
+    std::cout << "Reconnect errors: " << conn_stats.reconnect_errors << std::endl;
+    std::cout << "recv() errors: " << conn_stats.recv_errors << std::endl;
+    std::cout << "Total bytes received: " << conn_stats.bytes_received 
+              << " (" << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+    
+    if (conn_stats.disconnections > 0) {
+        std::cout << "\n⚠️  WARNING: " << conn_stats.disconnections 
+                  << " disconnection(s) detected. This may cause data loss!" << std::endl;
+    }
     
     return 0;
 }

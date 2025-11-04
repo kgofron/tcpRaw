@@ -11,10 +11,12 @@
 #include <ctime>
 #include <iostream>
 #include <iomanip>
+#include <chrono>
+#include <sstream>
 
 TCPServer::TCPServer(const char* host, uint16_t port)
     : host_(host), port_(port), socket_(-1), 
-      connected_(false), should_stop_(false)
+      connected_(false), should_stop_(false), stats_()
 {
 }
 
@@ -33,29 +35,65 @@ void TCPServer::closeConnection() {
         close(socket_);
         socket_ = -1;
     }
-    if (connected_ && connection_cb_) {
-        connected_ = false;
-        connection_cb_(false);
+    if (connected_) {
+        stats_.disconnections++;
+        
+        // Log disconnection with timestamp
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        
+        std::cout << "[TCP] Disconnected at " 
+                  << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S")
+                  << "." << std::setfill('0') << std::setw(3) << ms.count()
+                  << " (Total disconnections: " << stats_.disconnections << ")" << std::endl;
+        
+        if (connection_cb_) {
+            connected_ = false;
+            connection_cb_(false);
+        } else {
+            connected_ = false;
+        }
     } else {
         connected_ = false;
     }
 }
 
 bool TCPServer::connect() {
+    stats_.connection_attempts++;
+    
     // Create socket
     socket_ = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_ < 0) {
+        stats_.reconnect_errors++;
         return false;
     }
     
     // Set socket options for reliability
     int opt = 1;
     
-    // Enable TCP keepalive to detect dead connections
+    // Enable TCP keepalive to detect dead connections and keep connection alive
     if (setsockopt(socket_, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) < 0) {
         close(socket_);
         socket_ = -1;
         return false;
+    }
+    
+    // Configure TCP keepalive parameters (Linux-specific)
+    // Keepalive probe interval: 5 seconds
+    int keepidle = 5;  // Start sending keepalive probes after 5 seconds of idle
+    int keepintvl = 5; // Send keepalive probes every 5 seconds
+    int keepcnt = 3;   // Send 3 probes before considering connection dead
+    
+    if (setsockopt(socket_, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) < 0) {
+        // Not critical, continue if fails (some systems may not support this)
+    }
+    if (setsockopt(socket_, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl)) < 0) {
+        // Not critical, continue if fails
+    }
+    if (setsockopt(socket_, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) < 0) {
+        // Not critical, continue if fails
     }
     
     // Disable Nagle's algorithm for low latency
@@ -92,12 +130,27 @@ bool TCPServer::connect() {
     
     // Connect to server
     if (::connect(socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        stats_.reconnect_errors++;
         close(socket_);
         socket_ = -1;
         return false;
     }
     
+    stats_.successful_connections++;
     connected_ = true;
+    
+    // Log successful connection with timestamp
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    
+    std::cout << "[TCP] Connected at " 
+              << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S")
+              << "." << std::setfill('0') << std::setw(3) << ms.count()
+              << " (Attempt " << stats_.connection_attempts 
+              << ", Success " << stats_.successful_connections << ")" << std::endl;
+    
     if (connection_cb_) {
         connection_cb_(true);
     }
@@ -132,6 +185,7 @@ void TCPServer::run(DataCallback data_cb) {
             
             if (bytes_read == 0) {
                 // Connection closed by peer
+                std::cout << "[TCP] Connection closed by peer (EOF)" << std::endl;
                 closeConnection();
                 break;
             } else if (bytes_read < 0) {
@@ -144,9 +198,15 @@ void TCPServer::run(DataCallback data_cb) {
                     continue;
                 } else {
                     // Serious error, close connection
+                    stats_.recv_errors++;
+                    std::cout << "[TCP] recv() error: " << strerror(errno) 
+                              << " (errno=" << errno << ")" << std::endl;
                     closeConnection();
                     break;
                 }
+            } else {
+                // Successfully received data
+                stats_.bytes_received += bytes_read;
             }
             
             // Only process complete 8-byte words
