@@ -204,10 +204,7 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
 void print_statistics(const HitProcessor& processor) {
     const Statistics& stats = processor.getStatistics();
     
-    // Calculate elapsed time for display
-    auto now = std::chrono::steady_clock::now();
-    // Note: We can't access start_time_ns_ directly, so we'll estimate from cumulative rate
-    // or just show that cumulative rate is calculated from first hit
+    // Calculate elapsed time for display (estimated from cumulative rate)
     double elapsed_seconds = 0.0;
     if (stats.cumulative_hit_rate_hz > 0.0) {
         elapsed_seconds = stats.total_hits / stats.cumulative_hit_rate_hz;
