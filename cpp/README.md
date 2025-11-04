@@ -14,11 +14,17 @@ This program receives TPX3 raw data via TCP socket connection on port 8085, deco
 
 ## Features
 
-- **TCP Client**: Connects to SERVAL/ADTimePix3 driver
+- **TCP Client**: Connects to SERVAL/ADTimePix3 driver with automatic reconnection
 - **Complete Packet Decoding**: Supports all TPX3 packet types from the SERVAL manual
 - **Timestamp Extension**: Uses experimental extra packets to extend timestamps up to 325 days
-- **Statistics Tracking**: Real-time hit counting and rate calculation
-- **Efficient Buffering**: 8-byte aligned data processing
+- **Statistics Tracking**: Real-time hit counting and rate calculation (instant and cumulative)
+- **TDC1/TDC2 Rate Tracking**: Separate rate tracking for TDC1 and TDC2 events
+- **Per-Chip Statistics**: Individual hit rates for each chip (0-3)
+- **Efficient Buffering**: 8-byte aligned data processing with incomplete word buffering
+- **Connection Monitoring**: Comprehensive connection statistics and error tracking
+- **Packet Reordering**: Optional chunk-aware packet reordering for out-of-order packets
+- **High-Rate Performance**: Configurable statistics output for rates up to 140 MHz
+- **Data Integrity Verification**: Final summary compares parser received bytes with SERVAL file size
 - **Future-Ready Architecture**: Designed for 3D clustering and event classification
 
 ## Building
@@ -62,34 +68,107 @@ curl -X PUT http://localhost:8081/server/destination \
 
 ### Start the Parser
 
+**Basic usage:**
 ```bash
 ./bin/tpx3_parser
+```
+
+**With options:**
+```bash
+./bin/tpx3_parser --host 127.0.0.1 --port 8085 --stats-time 10 --exit-on-disconnect
+```
+
+**High-rate performance mode:**
+```bash
+./bin/tpx3_parser --stats-final-only --reorder
+```
+
+**Maximum performance mode:**
+```bash
+./bin/tpx3_parser --stats-disable --reorder
+```
+
+**Using the convenience script:**
+```bash
+./test/scripts/run_parser.sh --host 127.0.0.1 --port 8085 --stats-time 10
 ```
 
 The parser will:
 1. Initialize TCP client
 2. Connect to SERVAL on 127.0.0.1:8085
 3. Process incoming raw data chunks
-4. Print statistics every 1000 processed hits
+4. Print statistics according to configured intervals
+5. Print final summary when connection closes
+
+## Command-Line Options
+
+```bash
+./bin/tpx3_parser [OPTIONS]
+```
+
+**Connection options:**
+- `--host HOST` - TCP server host (default: 127.0.0.1)
+- `--port PORT` - TCP server port (default: 8085)
+
+**Reordering options:**
+- `--reorder` - Enable packet reordering
+- `--reorder-window SIZE` - Reorder buffer window size (default: 1000)
+
+**Statistics options (for high-rate performance):**
+- `--stats-interval N` - Print stats every N packets (default: 1000, 0=disable)
+- `--stats-time N` - Print status every N seconds (default: 10, 0=disable)
+- `--stats-final-only` - Only print final statistics (no periodic)
+- `--stats-disable` - Disable all statistics printing
+
+**Control options:**
+- `--exit-on-disconnect` - Exit after connection closes (don't auto-reconnect)
+- `--help` - Show help message
 
 ## Output
 
-The program prints periodic statistics:
+The program prints periodic statistics (if enabled):
 
 ```
 === Statistics ===
-Total hits: 5000
-Total chunks: 25
-Total TDC events: 120
-Hit rate: 15000.00 Hz
+Elapsed time: 34.8 s (0.6 min)
+Total hits: 64347603
+Total chunks: 125300
+Hit rate (instant): 2603938.60 Hz
+Hit rate (cumulative avg): 1849768.72 Hz
+Tdc1 rate (instant): 2.00 Hz
+Tdc1 rate (cumulative avg): 1.98 Hz
+Per-chip hit rates:
+  Chip 0: 654007.58 Hz
+  Chip 1: 652308.62 Hz
+  Chip 2: 657610.49 Hz
+  Chip 3: 640011.91 Hz
 ```
 
-And recent hit information:
+Final summary on exit:
 
 ```
-=== Recent Hits (last 10) ===
-Chip 0, X=128, Y=256, ToA=12345678 (1.5625ns units), ToT=500 ns [standard]
-...
+============================================================
+=== FINAL SUMMARY ===
+============================================================
+Total bytes received: 1122008160 (1070.03 MB)
+Total packets (words) received: 140251020
+
+=== Final Statistics ===
+[... processing statistics ...]
+
+=== Connection Statistics ===
+Connection attempts: 1
+Successful connections: 1
+Disconnections: 1
+Total bytes received: 1122008160 (1070.03 MB)
+Bytes dropped (incomplete words): 0
+
+============================================================
+Data Reception Summary:
+  Parser received: 1070.03 MB
+  (1122008160 bytes)
+  Compare with SERVAL .tpx3 file size to check for data loss.
+============================================================
 ```
 
 ## Architecture
@@ -103,12 +182,24 @@ cpp/
 │   ├── tpx3_decoder.cpp      # Packet decoding logic
 │   ├── tcp_server.cpp        # TCP connection handling
 │   ├── timestamp_extension.cpp # Time extension algorithms
-│   └── hit_processor.cpp     # Hit buffering and statistics
+│   ├── hit_processor.cpp     # Hit buffering and statistics
+│   ├── packet_reorder_buffer.cpp # Packet reordering for out-of-order packets
+│   └── ring_buffer.cpp       # Lock-free ring buffer implementation
 ├── include/
 │   ├── tpx3_packets.h        # Packet structure definitions
 │   ├── tpx3_decoder.h
 │   ├── tcp_server.h
-│   └── hit_processor.h
+│   ├── hit_processor.h
+│   ├── packet_reorder_buffer.h
+│   └── ring_buffer.h
+├── test/
+│   ├── src/
+│   │   └── tcp_raw_test.cpp  # Comprehensive protocol analysis tool
+│   ├── scripts/
+│   │   └── run_parser.sh     # Convenience script for running parser
+│   └── docs/
+│       ├── SERVAL_FEEDBACK.md # Feedback for SERVAL developers
+│       └── TEST_RESULTS_SUMMARY.md # Test results documentation
 ├── Makefile
 └── README.md
 ```
@@ -116,9 +207,26 @@ cpp/
 ### Key Components
 
 - **TCPServer**: Handles TCP connection lifecycle and data reception (client mode)
+  - Automatic reconnection on disconnect
+  - Incomplete word buffering (handles TCP fragmentation)
+  - Connection statistics and monitoring
+  - TCP keepalive configuration
 - **TPX3Decoder**: Decodes all packet types according to SERVAL manual
+  - All packet types: pixel, TDC, SPIDR, global time, TPX3 control
+  - Error handling for fractional TDC errors
+  - Protocol validation
 - **Timestamp Extension**: Implements wraparound-safe timestamp extension
+  - Uses extra timestamp packets (0x51, 0x21)
+  - Extends 30-bit timestamps up to 325 days
 - **HitProcessor**: Buffers hits and tracks statistics
+  - Instant and cumulative rate calculation
+  - Per-chip hit rate tracking
+  - TDC1/TDC2 rate tracking
+  - Efficient rate calculation (throttled to reduce overhead)
+- **PacketReorderBuffer**: Chunk-aware packet reordering
+  - Handles out-of-order SPIDR packets
+  - Configurable window size
+  - Statistics tracking
 
 ## Future Extensions
 

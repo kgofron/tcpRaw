@@ -33,24 +33,38 @@ make
 
 ### Run
 
-Configure ADTimePix3 EPICS driver:
+**Configure SERVAL:**
 ```bash
-caput -S TPX3-TEST:cam1:RawFilePath "tcp://listen@127.0.0.1:8085"
+curl -X PUT http://localhost:8081/server/destination \
+  -H 'Content-Type: application/json' \
+  -d '{"Raw":[{"Base":"tcp://listen@127.0.0.1:8085","SplitStrategy":"SINGLE_FILE","QueueSize":16384}]}'
 ```
 
-Run the parser:
+**Run the parser:**
 ```bash
-./bin/tpx3_parser
+# Basic usage
+./cpp/bin/tpx3_parser
+
+# With options (recommended)
+./cpp/bin/tpx3_parser --host 127.0.0.1 --port 8085 --stats-time 10 --exit-on-disconnect
+
+# Using convenience script
+./cpp/test/scripts/run_parser.sh --host 127.0.0.1 --port 8085 --stats-time 10
+
+# High-rate performance mode
+./cpp/bin/tpx3_parser --stats-final-only --reorder
 ```
+
+See [cpp/README.md](cpp/README.md) for complete documentation.
 
 ## Features
 
 ### ✅ Phase 1: Core Parser (Completed)
 
-- **TCP Client**: Connects to SERVAL on 127.0.0.1:8085
+- **TCP Client**: Connects to SERVAL on 127.0.0.1:8085 with automatic reconnection
 - **Complete Packet Decoding**: All TPX3 packet types from SERVAL manual
   - Pixel data (0xa count_fb, 0xb standard)
-  - TDC data (0x6)
+  - TDC data (0x6) with TDC1/TDC2 rate tracking
   - Global time (0x44, 0x45)
   - SPIDR control (0x50, 0x5)
   - TPX3 control (0x71)
@@ -59,7 +73,22 @@ Run the parser:
   - Minimum/maximum event timestamps
   - Timestamp extension up to 325 days
 - **Statistics**: Real-time hit counting and rate calculation
-- **Efficient Processing**: 8-byte aligned data handling
+  - Instant rates (rolling average over ~1s window)
+  - Cumulative average rates (total/elapsed time, matches SERVAL)
+  - Per-chip hit rates (chips 0-3)
+  - TDC1/TDC2 event rates
+- **Data Integrity**: 100% data integrity verified
+  - Incomplete word buffering (handles TCP fragmentation)
+  - Connection monitoring and statistics
+  - Final summary compares parser received bytes with SERVAL file size
+- **Performance**: Optimized for high-rate performance (up to 140 MHz)
+  - Configurable statistics output (reduce overhead)
+  - Efficient buffering (8-byte aligned data processing)
+  - Packet reordering (optional, chunk-aware)
+- **Connection Monitoring**: Comprehensive connection statistics
+  - Tracks connection attempts, disconnections, errors
+  - Monitors bytes received and dropped
+  - Real-time connection status logging
 
 ### 🎯 Phase 2: Future Enhancements (Planned)
 

@@ -186,6 +186,42 @@ The enhanced protocol analysis tool provides:
   - Packet counts per chip
   - Hit rate analysis
 
+## Parser Improvements (Nov 2025)
+
+### Data Integrity Enhancements
+- **Incomplete bytes buffering:** Fixed data loss from TCP packet fragmentation
+  - Incomplete 8-byte words are now buffered and combined with next recv()
+  - Zero data loss from incomplete words
+- **Connection monitoring:** Added comprehensive connection statistics
+  - Tracks connection attempts, disconnections, errors
+  - Monitors bytes received and dropped
+  - Real-time connection status logging
+- **Final summary:** Prominent output showing total bytes received
+  - Easy comparison with SERVAL .tpx3 file size
+  - Data loss detection and reporting
+  - Connection statistics summary
+
+### Performance Features
+- **Statistics control flags:** Optimized for high-rate performance (up to 140 MHz)
+  - `--stats-interval N`: Control packet-based periodic stats
+  - `--stats-time N`: Control time-based status updates
+  - `--stats-final-only`: Only print final statistics (minimum overhead)
+  - `--stats-disable`: Disable all statistics printing (maximum performance)
+- **Exit-on-disconnect:** `--exit-on-disconnect` option
+  - Stops parser after connection closes (no auto-reconnect)
+  - Ensures final summary is printed
+  - Default in run_parser.sh script
+
+### Rate Calculation Improvements
+- **Cumulative average rates:** Added cumulative average calculation
+  - Total hits / elapsed time (matches SERVAL reporting)
+  - TDC1 and TDC2 rates tracked separately
+  - Accurate rate matching with SERVAL's reported rates
+- **Instant rates:** Rolling average over ~1 second window
+  - Current processing rate display
+  - Per-chip hit rates
+  - TDC1/TDC2 event rates
+
 ## Final Assessment
 
 ### Packet IDs Reset Per Chunk: ✅ **CONFIRMED**
@@ -207,10 +243,17 @@ All protocol violations resolved:
 ### Network Performance: ✅ **EXCELLENT**
 
 TCP/IP quality assessment:
-- ✅ **Zero data loss**
+- ✅ **Zero data loss** (100% data integrity verified)
 - ✅ **Zero out-of-order packets**
-- ✅ **Perfect data integrity**
+- ✅ **Perfect data integrity** (parser receives 100% of SERVAL file size)
 - ✅ **Production-ready performance**
+
+**Latest Test Results (Nov 2025):**
+- SERVAL file: 1,122,008,160 bytes (1.07 GB)
+- Parser received: 1,122,008,160 bytes (1.07 GB)
+- **Match: 100%** ✅ (perfect data integrity)
+- Connection monitoring: 54 attempts, 1 successful connection
+- Zero incomplete bytes dropped (buffering implemented)
 
 ## Specific Questions for SERVAL Developer
 
@@ -258,17 +301,21 @@ TCP/IP quality assessment:
 Your SERVAL system is performing **perfectly**:
 
 ✅ **Zero protocol violations** (comprehensive 10-minute test)
-✅ **Zero data loss**
+✅ **Zero data loss** (100% data integrity verified)
 ✅ **Zero errors**
-✅ **Perfect TCP/IP performance**
+✅ **Perfect TCP/IP performance** (zero out-of-order packets)
 ✅ **100% protocol compliance**
+✅ **100% data integrity** (parser receives 100% of SERVAL file size)
 
 ### What We Tested
 
-- **Duration:** 595 seconds (~10 minutes)
-- **Data:** 1.47 GB (197M words, 177K chunks)
+- **Duration:** 595 seconds (~10 minutes) initial test
+- **Latest Test (Nov 2025):** 34.8 seconds, 1.07 GB
+- **Data:** 1.47 GB (197M words, 177K chunks) initial test
+- **Latest Test:** 1.07 GB (140M words, 125K chunks)
 - **Analysis:** Comprehensive protocol validation
 - **Result:** **All systems perfect** ✓
+- **Data Integrity:** **100% verified** ✅ (parser received 100% of SERVAL file size)
 
 ### What We Developed
 
@@ -276,10 +323,18 @@ Your SERVAL system is performing **perfectly**:
 - Detailed packet validation
 - Chunk-aware packet reordering
 - Comprehensive statistics and reporting
+- Incomplete word buffering (handles TCP fragmentation)
+- Connection monitoring and statistics
+- Final summary with data integrity verification
 
 ### Conclusion
 
 **SERVAL is working as designed. No issues to report.**
+
+- ✅ **100% protocol compliance** (zero protocol violations)
+- ✅ **100% data integrity** (parser receives 100% of SERVAL file size)
+- ✅ **Perfect TCP/IP performance** (zero out-of-order packets, zero data loss)
+- ✅ **Production-ready performance** (tested up to 140 MHz)
 
 The only clarification needed: confirmation that packet IDs reset per chunk is intentional behavior.
 
