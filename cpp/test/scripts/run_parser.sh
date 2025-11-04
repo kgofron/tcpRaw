@@ -1,4 +1,11 @@
 #!/bin/bash
+#
+# Author: Kazimierz Gofron
+#         Oak Ridge National Laboratory
+#
+# Created:  November 2, 2025
+# Modified: November 4, 2025
+#
 # Shell script to run TPX3 parser with common options
 # Usage: ./run_parser.sh [options]
 

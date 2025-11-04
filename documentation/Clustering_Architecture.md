@@ -1,5 +1,10 @@
 # 3D Clustering and Event Classification Architecture
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 ## Overview
 
 This document outlines the architecture for future implementation of 3D spatial-temporal clustering and event classification for Timepix3 detector data.

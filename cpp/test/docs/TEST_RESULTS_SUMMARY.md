@@ -1,5 +1,10 @@
 # Test Results Summary: 2025-11-03
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 ## Executive Summary
 
 **Test Duration:** 595 seconds (~10 minutes)  

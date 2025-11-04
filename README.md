@@ -1,5 +1,10 @@
 # TPX3 Raw Data Parser and EPICS IOC
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 C++ implementation for parsing Timepix3 raw data with support for all packet types, experimental time extension, and architecture for future 3D clustering and EPICS integration.
 
 ## Project Structure
@@ -206,6 +211,9 @@ make run      # Build and run
 [Specify license]
 
 ## Authors
+
+**Primary Author:** Kazimierz Gofron, Oak Ridge National Laboratory  
+**Created:** November 2, 2025
 
 Based on Python implementation by Amsterdam Scientific Instruments.
 

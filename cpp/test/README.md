@@ -1,5 +1,10 @@
 # TPX3 Protocol Test and Analysis Tools
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 This directory contains test programs, scripts, documentation, and results for analyzing the TPX3 raw data protocol and comparing with the real-time parser.
 
 ## Directory Structure

@@ -1,3 +1,11 @@
+/*
+ * Author: Kazimierz Gofron
+ *         Oak Ridge National Laboratory
+ *
+ * Created:  November 2, 2025
+ * Modified: November 4, 2025
+ */
+
 #include "tcp_server.h"
 #include "tpx3_decoder.h"
 #include "timestamp_extension.h"

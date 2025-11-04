@@ -1,4 +1,11 @@
 #!/bin/bash
+#
+# Author: Kazimierz Gofron
+#         Oak Ridge National Laboratory
+#
+# Created:  November 2, 2025
+# Modified: November 4, 2025
+#
 # Script to run both tools simultaneously on two different SERVAL TCP sockets
 # This allows true parallel comparison of the same data stream
 # Run from project root directory

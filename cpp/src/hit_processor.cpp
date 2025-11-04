@@ -1,3 +1,11 @@
+/*
+ * Author: Kazimierz Gofron
+ *         Oak Ridge National Laboratory
+ *
+ * Created:  November 2, 2025
+ * Modified: November 4, 2025
+ */
+
 #include "hit_processor.h"
 #include <chrono>
 

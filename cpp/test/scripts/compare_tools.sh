@@ -1,4 +1,11 @@
 #!/bin/bash
+#
+# Author: Kazimierz Gofron
+#         Oak Ridge National Laboratory
+#
+# Created:  November 2, 2025
+# Modified: November 4, 2025
+#
 # Script to run both tools simultaneously and compare their statistics
 # This uses a TCP stream duplicator to feed the same data to both tools
 

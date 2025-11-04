@@ -1,5 +1,10 @@
 # TPX3 Raw Data Parser and Processing Pipeline
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 ## Overview
 Build a C++ program that receives TPX3 raw data via TCP socket, decodes all packet types (pixel hits, TDC, control, time extension), performs timestamp extension, and establishes the foundation for 3D spatial clustering and event centroid detection.
 

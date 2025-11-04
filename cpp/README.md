@@ -1,5 +1,10 @@
 # TPX3 Raw Data Parser
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 C++ implementation for parsing Timepix3 raw data from TCP stream, with support for all packet types and experimental time extension.
 
 ## Overview

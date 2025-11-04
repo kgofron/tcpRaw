@@ -1,5 +1,10 @@
 # Feedback for SERVAL Developer: TPX3 Protocol Analysis Results
 
+**Author:** Kazimierz Gofron  
+**Institution:** Oak Ridge National Laboratory  
+**Created:** November 2, 2025  
+**Modified:** November 4, 2025
+
 ## Summary
 
 Comprehensive protocol analysis of TPX3 raw data stream demonstrates excellent data integrity and protocol conformance. Final tests show perfect performance with zero errors across all metrics.

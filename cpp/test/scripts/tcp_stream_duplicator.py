@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+#
+# Author: Kazimierz Gofron
+#         Oak Ridge National Laboratory
+#
+# Created:  November 2, 2025
+# Modified: November 4, 2025
+#
 """
 TCP Stream Duplicator
 Listens on a source port and duplicates the stream to multiple destination ports.

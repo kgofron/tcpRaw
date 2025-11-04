@@ -1,3 +1,11 @@
+/*
+ * Author: Kazimierz Gofron
+ *         Oak Ridge National Laboratory
+ *
+ * Created:  November 2, 2025
+ * Modified: November 4, 2025
+ */
+
 #ifndef TPX3_PACKETS_H
 #define TPX3_PACKETS_H
 
