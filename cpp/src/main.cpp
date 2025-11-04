@@ -275,8 +275,12 @@ int main(int argc, char* argv[]) {
     uint16_t port = 8085;
     bool enable_reorder = false;
     size_t reorder_window_size = 1000;
+    size_t stats_interval = 1000;  // Print stats every N packets
+    int stats_time_interval = 10;  // Print status every N seconds (0 = disable)
+    bool stats_final_only = false; // Only print final statistics
+    bool stats_disable = false;    // Completely disable statistics printing
     
-    // Parse command line arguments for host and port
+    // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--host" && i + 1 < argc) {
@@ -287,12 +291,31 @@ int main(int argc, char* argv[]) {
             enable_reorder = true;
         } else if (arg == "--reorder-window" && i + 1 < argc) {
             reorder_window_size = std::stoul(argv[++i]);
+        } else if (arg == "--stats-interval" && i + 1 < argc) {
+            stats_interval = std::stoul(argv[++i]);
+        } else if (arg == "--stats-time" && i + 1 < argc) {
+            stats_time_interval = std::stoi(argv[++i]);
+        } else if (arg == "--stats-final-only") {
+            stats_final_only = true;
+            stats_interval = 0;  // Disable periodic stats
+        } else if (arg == "--stats-disable") {
+            stats_disable = true;
+            stats_interval = 0;
+            stats_time_interval = 0;
         } else if (arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " [--host HOST] [--port PORT] [--reorder] [--reorder-window SIZE]" << std::endl;
+            std::cout << "Usage: " << argv[0] << " [OPTIONS]" << std::endl;
+            std::cout << "Connection options:" << std::endl;
             std::cout << "  --host HOST           TCP server host (default: 127.0.0.1)" << std::endl;
             std::cout << "  --port PORT           TCP server port (default: 8085)" << std::endl;
+            std::cout << "Reordering options:" << std::endl;
             std::cout << "  --reorder             Enable packet reordering" << std::endl;
             std::cout << "  --reorder-window SIZE Reorder buffer window size (default: 1000)" << std::endl;
+            std::cout << "Statistics options (for high-rate performance):" << std::endl;
+            std::cout << "  --stats-interval N    Print stats every N packets (default: 1000, 0=disable)" << std::endl;
+            std::cout << "  --stats-time N        Print status every N seconds (default: 10, 0=disable)" << std::endl;
+            std::cout << "  --stats-final-only    Only print final statistics (no periodic)" << std::endl;
+            std::cout << "  --stats-disable       Disable all statistics printing" << std::endl;
+            std::cout << "  --help                Show this help message" << std::endl;
             return 0;
         }
     }
@@ -305,6 +328,22 @@ int main(int argc, char* argv[]) {
     }
     std::cout << std::endl;
     
+    if (stats_disable) {
+        std::cout << "Statistics: disabled (performance mode)" << std::endl;
+    } else if (stats_final_only) {
+        std::cout << "Statistics: final only (performance mode)" << std::endl;
+    } else {
+        if (stats_interval > 0) {
+            std::cout << "Statistics: every " << stats_interval << " packets";
+        } else {
+            std::cout << "Statistics: periodic disabled";
+        }
+        if (stats_time_interval > 0) {
+            std::cout << ", status every " << stats_time_interval << " seconds";
+        }
+        std::cout << std::endl;
+    }
+    
     TCPServer server(host, port);
     
     if (!server.initialize()) {
@@ -313,7 +352,11 @@ int main(int argc, char* argv[]) {
     }
     
     std::cout << "TCP client initialized, connecting to server..." << std::endl;
-    std::cout << "Statistics will be printed every 1000 packets processed\n" << std::endl;
+    if (!stats_disable && !stats_final_only) {
+        std::cout << "Waiting for data...\n" << std::endl;
+    } else {
+        std::cout << "Waiting for data (high-rate mode)...\n" << std::endl;
+    }
     
     HitProcessor processor;
     ChunkMetadata chunk_meta;
@@ -325,7 +368,6 @@ int main(int argc, char* argv[]) {
     }
     
     size_t print_counter = 0;
-    const size_t PRINT_INTERVAL = 1000;
     
     auto last_status_print = std::chrono::steady_clock::now();
     uint64_t last_hits = 0;
@@ -359,28 +401,33 @@ int main(int argc, char* argv[]) {
         process_raw_data(data, size, processor, chunk_meta, 
                         reorder_buffer ? reorder_buffer.get() : nullptr, 0);
         
-        // Print periodic statistics
-        print_counter += (size / 8);
-        if (print_counter >= PRINT_INTERVAL) {
-            std::cout << "\n[Periodic Statistics Update]" << std::endl;
-            print_statistics(processor);
-            std::cout << std::endl;
-            print_counter = 0;
+        // Print periodic statistics (if enabled)
+        if (!stats_disable && stats_interval > 0 && !stats_final_only) {
+            print_counter += (size / 8);
+            if (print_counter >= stats_interval) {
+                std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                print_statistics(processor);
+                std::cout << std::endl;
+                print_counter = 0;
+            }
         }
         
-        // Also print status every 10 seconds
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            now - last_status_print).count();
-        if (elapsed >= 10) {
-            const Statistics& stats = processor.getStatistics();
-            uint64_t hits_diff = stats.total_hits - last_hits;
-            std::cout << "[Status] Processed " << hits_diff << " hits in last 10s" << std::endl;
-            std::cout << "[Status] Total bytes received: " << total_bytes_received 
-                      << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
-            std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
-            last_hits = stats.total_hits;
-            last_status_print = now;
+        // Print status at intervals (if enabled)
+        if (!stats_disable && stats_time_interval > 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                now - last_status_print).count();
+            if (elapsed >= stats_time_interval) {
+                const Statistics& stats = processor.getStatistics();
+                uint64_t hits_diff = stats.total_hits - last_hits;
+                std::cout << "[Status] Processed " << hits_diff << " hits in last " 
+                          << stats_time_interval << "s" << std::endl;
+                std::cout << "[Status] Total bytes received: " << total_bytes_received 
+                          << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+                std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
+                last_hits = stats.total_hits;
+                last_status_print = now;
+            }
         }
     });
     
@@ -393,9 +440,12 @@ int main(int argc, char* argv[]) {
         std::cout << "  3. Check SERVAL configuration and status" << std::endl;
     }
     
-    // Print final statistics
-    print_statistics(processor);
-    print_recent_hits(processor, 10);
+    // Print final statistics (unless completely disabled)
+    if (!stats_disable) {
+        std::cout << "\n=== Final Statistics ===" << std::endl;
+        print_statistics(processor);
+        print_recent_hits(processor, 10);
+    }
     
     // Print connection statistics
     const auto& conn_stats = server.getConnectionStats();
@@ -407,6 +457,14 @@ int main(int argc, char* argv[]) {
     std::cout << "recv() errors: " << conn_stats.recv_errors << std::endl;
     std::cout << "Total bytes received: " << conn_stats.bytes_received 
               << " (" << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+    std::cout << "Bytes dropped (incomplete words): " << conn_stats.bytes_dropped_incomplete 
+              << " (" << (conn_stats.bytes_dropped_incomplete / 1024.0) << " KB)" << std::endl;
+    
+    if (conn_stats.bytes_dropped_incomplete > 0) {
+        std::cout << "⚠️  WARNING: " << conn_stats.bytes_dropped_incomplete 
+                  << " bytes were dropped due to incomplete 8-byte words!" << std::endl;
+        std::cout << "   This may indicate TCP packet fragmentation issues." << std::endl;
+    }
     
     if (conn_stats.disconnections > 0) {
         std::cout << "\n⚠️  WARNING: " << conn_stats.disconnections 

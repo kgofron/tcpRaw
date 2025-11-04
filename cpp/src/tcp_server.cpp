@@ -16,7 +16,8 @@
 
 TCPServer::TCPServer(const char* host, uint16_t port)
     : host_(host), port_(port), socket_(-1), 
-      connected_(false), should_stop_(false), stats_()
+      connected_(false), should_stop_(false), stats_(),
+      incomplete_buffer_size_(0)
 {
 }
 
@@ -31,6 +32,12 @@ bool TCPServer::initialize() {
 }
 
 void TCPServer::closeConnection() {
+    // Clear incomplete buffer on disconnect
+    if (incomplete_buffer_size_ > 0) {
+        stats_.bytes_dropped_incomplete += incomplete_buffer_size_;
+        incomplete_buffer_size_ = 0;
+    }
+    
     if (socket_ >= 0) {
         close(socket_);
         socket_ = -1;
@@ -175,18 +182,29 @@ void TCPServer::run(DataCallback data_cb) {
         
         // Connected, now read data
         constexpr size_t BUFFER_SIZE = 8192; // 8KB buffer
-        uint8_t buffer[BUFFER_SIZE];
+        uint8_t buffer[BUFFER_SIZE + 8];  // Extra space for incomplete bytes
         
         while (connected_ && !should_stop_) {
-            // Read as much as possible, but ensure we read in multiples of 8
-            size_t bytes_to_read = BUFFER_SIZE;
+            // First, copy any incomplete bytes from previous recv() to start of buffer
+            size_t bytes_to_process = incomplete_buffer_size_;
+            if (incomplete_buffer_size_ > 0) {
+                std::memcpy(buffer, incomplete_buffer_, incomplete_buffer_size_);
+            }
             
-            ssize_t bytes_read = recv(socket_, buffer, bytes_to_read, 0);
+            // Read new data after the incomplete bytes
+            size_t bytes_to_read = BUFFER_SIZE;
+            ssize_t bytes_read = recv(socket_, buffer + incomplete_buffer_size_, bytes_to_read, 0);
             
             if (bytes_read == 0) {
                 // Connection closed by peer
+                if (incomplete_buffer_size_ > 0) {
+                    std::cout << "[TCP] WARNING: Connection closed with " 
+                              << incomplete_buffer_size_ << " incomplete bytes in buffer" << std::endl;
+                    stats_.bytes_dropped_incomplete += incomplete_buffer_size_;
+                }
                 std::cout << "[TCP] Connection closed by peer (EOF)" << std::endl;
                 closeConnection();
+                incomplete_buffer_size_ = 0;
                 break;
             } else if (bytes_read < 0) {
                 // Check for recoverable errors
@@ -201,18 +219,32 @@ void TCPServer::run(DataCallback data_cb) {
                     stats_.recv_errors++;
                     std::cout << "[TCP] recv() error: " << strerror(errno) 
                               << " (errno=" << errno << ")" << std::endl;
+                    if (incomplete_buffer_size_ > 0) {
+                        stats_.bytes_dropped_incomplete += incomplete_buffer_size_;
+                        incomplete_buffer_size_ = 0;
+                    }
                     closeConnection();
                     break;
                 }
             } else {
                 // Successfully received data
                 stats_.bytes_received += bytes_read;
+                bytes_to_process += bytes_read;  // Total bytes to process
             }
             
-            // Only process complete 8-byte words
-            size_t complete_words = (bytes_read / 8) * 8;
+            // Process complete 8-byte words
+            size_t complete_words = (bytes_to_process / 8) * 8;
             if (complete_words > 0 && data_cb) {
                 data_cb(buffer, complete_words);
+            }
+            
+            // Save incomplete bytes for next recv() call
+            size_t incomplete_bytes = bytes_to_process % 8;
+            if (incomplete_bytes > 0) {
+                std::memcpy(incomplete_buffer_, buffer + complete_words, incomplete_bytes);
+                incomplete_buffer_size_ = incomplete_bytes;
+            } else {
+                incomplete_buffer_size_ = 0;
             }
         }
         

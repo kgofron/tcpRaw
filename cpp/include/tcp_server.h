@@ -31,6 +31,7 @@ public:
         uint64_t disconnections = 0;
         uint64_t reconnect_errors = 0;
         uint64_t bytes_received = 0;
+        uint64_t bytes_dropped_incomplete = 0;  // Bytes dropped due to incomplete words
         uint64_t recv_errors = 0;
     };
     
@@ -45,6 +46,10 @@ private:
     bool should_stop_;
     ConnectionCallback connection_cb_;
     ConnectionStats stats_;
+    
+    // Buffer for incomplete words (bytes not in multiples of 8)
+    uint8_t incomplete_buffer_[8];
+    size_t incomplete_buffer_size_;
     
     void closeConnection();
     bool connect();
