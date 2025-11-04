@@ -32,6 +32,8 @@ struct Statistics {
     double cumulative_tdc1_rate_hz;  // Cumulative average: total_tdc1_events / elapsed_time
     double cumulative_tdc2_rate_hz;  // Cumulative average: total_tdc2_events / elapsed_time
     std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
+    std::map<uint8_t, uint64_t> chip_tdc1_counts;  // Per-chip TDC1 event counts
+    std::map<uint8_t, double> chip_tdc1_rates_hz;  // Per-chip TDC1 rates
 };
 
 class HitProcessor {
@@ -39,7 +41,7 @@ public:
     HitProcessor();
     
     void addHit(const PixelHit& hit);
-    void addTdcEvent(const TDCEvent& tdc);
+    void addTdcEvent(const TDCEvent& tdc, uint8_t chip_index);
     void incrementChunkCount();
     void processChunkMetadata(const ChunkMetadata& metadata);
     void incrementDecodeError();
@@ -62,6 +64,7 @@ private:
     uint64_t tdc1_events_at_last_update_;
     uint64_t tdc2_events_at_last_update_;
     std::map<uint8_t, uint64_t> chip_hits_at_last_update_;
+    std::map<uint8_t, uint64_t> chip_tdc1_at_last_update_;
     uint64_t calls_since_last_update_;
     
     void updateHitRate();

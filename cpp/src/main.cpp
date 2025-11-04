@@ -89,7 +89,7 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
         case TDC_DATA: {
             try {
                 TDCEvent tdc = decode_tdc_data(word);
-                processor.addTdcEvent(tdc);
+                processor.addTdcEvent(tdc, chip_index);
             } catch (const std::exception& e) {
                 processor.incrementDecodeError();
                 // Check if this is a fractional error
@@ -238,7 +238,7 @@ void print_statistics(const HitProcessor& processor) {
               << stats.cumulative_hit_rate_hz << " Hz" << std::endl;
     std::cout << "Tdc1 rate (instant): " << std::fixed << std::setprecision(2) 
               << stats.tdc1_rate_hz << " Hz" << std::endl;
-    std::cout << "Tdc1 rate (cumulative avg): " << std::fixed << std::setprecision(2) 
+    std::cout << "Tdc1 rate (cumulative avg, detector-wide): " << std::fixed << std::setprecision(2) 
               << stats.cumulative_tdc1_rate_hz << " Hz" << std::endl;
     std::cout << "Tdc2 rate (instant): " << std::fixed << std::setprecision(2) 
               << stats.tdc2_rate_hz << " Hz" << std::endl;
@@ -262,6 +262,20 @@ void print_statistics(const HitProcessor& processor) {
                       << ": " << std::fixed << std::setprecision(2) 
                       << pair.second << " Hz" << std::endl;
         }
+    }
+    
+    if (!stats.chip_tdc1_rates_hz.empty()) {
+        std::cout << "Per-chip TDC1 rates (averaged per chip, for diagnostics):" << std::endl;
+        for (const auto& pair : stats.chip_tdc1_rates_hz) {
+            uint8_t chip = pair.first;
+            uint64_t total_count = stats.chip_tdc1_counts.count(chip) 
+                ? stats.chip_tdc1_counts.at(chip) : 0;
+            std::cout << "  Chip " << static_cast<int>(chip) 
+                      << ": " << std::fixed << std::setprecision(2) 
+                      << pair.second << " Hz (total: " << total_count << ")" << std::endl;
+        }
+        // Note: Per-chip rates sum may not equal detector-wide rate if different chips
+        // have different activity periods. Detector-wide cumulative rate matches SERVAL.
     }
 }
 

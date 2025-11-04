@@ -31,12 +31,15 @@ void HitProcessor::resetStatistics() {
     stats_.cumulative_tdc1_rate_hz = 0.0;
     stats_.cumulative_tdc2_rate_hz = 0.0;
     stats_.chip_hit_rates_hz.clear();
+    stats_.chip_tdc1_counts.clear();
+    stats_.chip_tdc1_rates_hz.clear();
     start_time_ns_ = 0;  // Will be initialized on first hit to exclude idle time
     last_update_time_ns_ = 0;
     hits_at_last_update_ = 0;
     tdc1_events_at_last_update_ = 0;
     tdc2_events_at_last_update_ = 0;
     chip_hits_at_last_update_.clear();
+    chip_tdc1_at_last_update_.clear();
     calls_since_last_update_ = 0;
 }
 
@@ -63,16 +66,34 @@ void HitProcessor::addHit(const PixelHit& hit) {
     }
 }
 
-void HitProcessor::addTdcEvent(const TDCEvent& tdc) {
+void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
     stats_.total_tdc_events++;
+    
+    // Initialize start_time_ns_ on first event (hit or TDC) to exclude idle time
+    // This ensures cumulative rates are calculated from first data, not just first hit
+    if (start_time_ns_ == 0) {
+        auto now = std::chrono::steady_clock::now();
+        start_time_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count();
+        last_update_time_ns_ = start_time_ns_;
+        hits_at_last_update_ = 0;
+        tdc1_events_at_last_update_ = 0;
+        tdc2_events_at_last_update_ = 0;
+    }
+    
     // Track TDC1 events separately (RISE and FALL)
     if (tdc.type == TDC1_RISE || tdc.type == TDC1_FALL) {
         stats_.total_tdc1_events++;
+        stats_.chip_tdc1_counts[chip_index]++;  // Track per-chip TDC1 counts
     }
     // Track TDC2 events separately (RISE and FALL)
     if (tdc.type == TDC2_RISE || tdc.type == TDC2_FALL) {
         stats_.total_tdc2_events++;
     }
+    
+    // Update cumulative rates immediately for TDC events
+    // (Rate updates are throttled for hits, but TDC events are infrequent)
+    updateHitRate();
 }
 
 void HitProcessor::incrementChunkCount() {
@@ -93,7 +114,8 @@ void HitProcessor::updateHitRate() {
     uint64_t current_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
     
-    // Calculate cumulative rates based on total elapsed time (only if we've started)
+    // Always update cumulative rates based on total elapsed time (if we've started)
+    // This ensures cumulative rates are accurate even if updateHitRate is called infrequently
     if (start_time_ns_ > 0) {
         uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
         if (total_elapsed_ns > 0) {
@@ -150,12 +172,24 @@ void HitProcessor::updateHitRate() {
             stats_.chip_hit_rates_hz[chip] = new_chip_hits / elapsed_seconds;
         }
         
+        // Update per-chip TDC1 rates
+        stats_.chip_tdc1_rates_hz.clear();
+        for (const auto& pair : stats_.chip_tdc1_counts) {
+            uint8_t chip = pair.first;
+            uint64_t current_count = pair.second;
+            uint64_t last_count = chip_tdc1_at_last_update_.count(chip) 
+                ? chip_tdc1_at_last_update_[chip] : 0;
+            uint64_t new_tdc1_events = current_count - last_count;
+            stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events / elapsed_seconds;
+        }
+        
         // Update last state
         last_update_time_ns_ = current_time_ns;
         hits_at_last_update_ = stats_.total_hits;  // Use stats_.total_hits instead of hits_.size()
         tdc1_events_at_last_update_ = stats_.total_tdc1_events;
         tdc2_events_at_last_update_ = stats_.total_tdc2_events;
         chip_hits_at_last_update_ = current_chip_hits;
+        chip_tdc1_at_last_update_ = stats_.chip_tdc1_counts;
     }
 }
 
