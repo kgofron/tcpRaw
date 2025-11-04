@@ -440,28 +440,39 @@ int main(int argc, char* argv[]) {
         std::cout << "  3. Check SERVAL configuration and status" << std::endl;
     }
     
+    // Print final summary
+    const auto& conn_stats = server.getConnectionStats();
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "=== FINAL SUMMARY ===" << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
+    std::cout << "Total bytes received: " << conn_stats.bytes_received 
+              << " (" << std::fixed << std::setprecision(2) 
+              << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+    std::cout << "Total packets (words) received: " << total_packets_received << std::endl;
+    if (conn_stats.bytes_dropped_incomplete > 0) {
+        std::cout << "Bytes dropped (incomplete words): " << conn_stats.bytes_dropped_incomplete 
+                  << " (" << std::fixed << std::setprecision(2)
+                  << (conn_stats.bytes_dropped_incomplete / 1024.0) << " KB)" << std::endl;
+    }
+    std::cout << std::endl;
+    
     // Print final statistics (unless completely disabled)
     if (!stats_disable) {
-        std::cout << "\n=== Final Statistics ===" << std::endl;
+        std::cout << "=== Final Statistics ===" << std::endl;
         print_statistics(processor);
         print_recent_hits(processor, 10);
     }
     
     // Print connection statistics
-    const auto& conn_stats = server.getConnectionStats();
     std::cout << "\n=== Connection Statistics ===" << std::endl;
     std::cout << "Connection attempts: " << conn_stats.connection_attempts << std::endl;
     std::cout << "Successful connections: " << conn_stats.successful_connections << std::endl;
     std::cout << "Disconnections: " << conn_stats.disconnections << std::endl;
     std::cout << "Reconnect errors: " << conn_stats.reconnect_errors << std::endl;
     std::cout << "recv() errors: " << conn_stats.recv_errors << std::endl;
-    std::cout << "Total bytes received: " << conn_stats.bytes_received 
-              << " (" << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
-    std::cout << "Bytes dropped (incomplete words): " << conn_stats.bytes_dropped_incomplete 
-              << " (" << (conn_stats.bytes_dropped_incomplete / 1024.0) << " KB)" << std::endl;
     
     if (conn_stats.bytes_dropped_incomplete > 0) {
-        std::cout << "⚠️  WARNING: " << conn_stats.bytes_dropped_incomplete 
+        std::cout << "\n⚠️  WARNING: " << conn_stats.bytes_dropped_incomplete 
                   << " bytes were dropped due to incomplete 8-byte words!" << std::endl;
         std::cout << "   This may indicate TCP packet fragmentation issues." << std::endl;
     }
@@ -469,6 +480,16 @@ int main(int argc, char* argv[]) {
     if (conn_stats.disconnections > 0) {
         std::cout << "\n⚠️  WARNING: " << conn_stats.disconnections 
                   << " disconnection(s) detected. This may cause data loss!" << std::endl;
+    }
+    
+    // Compare with expected data size if available
+    if (conn_stats.bytes_received > 0) {
+        std::cout << "\n" << std::string(60, '=') << std::endl;
+        std::cout << "Data Reception Summary:" << std::endl;
+        std::cout << "  Parser received: " << std::fixed << std::setprecision(2)
+                  << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB" << std::endl;
+        std::cout << "  Compare with SERVAL .tpx3 file size to check for data loss." << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
     }
     
     return 0;
