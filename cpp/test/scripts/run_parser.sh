@@ -16,6 +16,7 @@ STATS_TIME="${STATS_TIME:-10}"
 STATS_INTERVAL="${STATS_INTERVAL:-0}"  # 0 = disable packet-based stats
 REORDER="${REORDER:-false}"
 REORDER_WINDOW="${REORDER_WINDOW:-1000}"
+EXIT_ON_DISCONNECT="${EXIT_ON_DISCONNECT:-true}"  # Default: exit after disconnect (don't auto-reconnect)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -51,6 +52,14 @@ while [[ $# -gt 0 ]]; do
         --reorder-window)
             REORDER_WINDOW="$2"
             shift 2
+            ;;
+        --exit-on-disconnect)
+            EXIT_ON_DISCONNECT=true
+            shift
+            ;;
+        --no-exit-on-disconnect)
+            EXIT_ON_DISCONNECT=false
+            shift
             ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
@@ -108,6 +117,11 @@ fi
 # Add reordering options
 if [[ "$REORDER" == "true" ]]; then
     CMD="$CMD --reorder --reorder-window $REORDER_WINDOW"
+fi
+
+# Add exit-on-disconnect option
+if [[ "$EXIT_ON_DISCONNECT" == "true" ]]; then
+    CMD="$CMD --exit-on-disconnect"
 fi
 
 # Check if parser exists

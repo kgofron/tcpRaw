@@ -12,6 +12,8 @@
 #include <bitset>
 #include <chrono>
 #include <memory>
+#include <csignal>
+#include <atomic>
 
 // Helper function to process a single packet (used by reorder buffer callback)
 void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, ChunkMetadata& chunk_meta) {
@@ -279,6 +281,7 @@ int main(int argc, char* argv[]) {
     int stats_time_interval = 10;  // Print status every N seconds (0 = disable)
     bool stats_final_only = false; // Only print final statistics
     bool stats_disable = false;    // Completely disable statistics printing
+    bool exit_on_disconnect = false; // Exit after connection closes (don't auto-reconnect)
     
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
@@ -302,6 +305,8 @@ int main(int argc, char* argv[]) {
             stats_disable = true;
             stats_interval = 0;
             stats_time_interval = 0;
+        } else if (arg == "--exit-on-disconnect") {
+            exit_on_disconnect = true;
         } else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " [OPTIONS]" << std::endl;
             std::cout << "Connection options:" << std::endl;
@@ -315,6 +320,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --stats-time N        Print status every N seconds (default: 10, 0=disable)" << std::endl;
             std::cout << "  --stats-final-only    Only print final statistics (no periodic)" << std::endl;
             std::cout << "  --stats-disable       Disable all statistics printing" << std::endl;
+            std::cout << "  --exit-on-disconnect  Exit after connection closes (don't auto-reconnect)" << std::endl;
             std::cout << "  --help                Show this help message" << std::endl;
             return 0;
         }
@@ -372,12 +378,24 @@ int main(int argc, char* argv[]) {
     auto last_status_print = std::chrono::steady_clock::now();
     uint64_t last_hits = 0;
     
+    // Signal handler for graceful shutdown (global variable needed for signal handler)
+    static TCPServer* g_server = &server;
+    signal(SIGINT, [](int) {
+        if (g_server) {
+            g_server->stop();
+        }
+        std::cout << "\n[SIGINT] Received interrupt signal, shutting down gracefully..." << std::endl;
+    });
+    
     server.setConnectionCallback([&](bool connected) {
         if (connected) {
             std::cout << "✓ Client connected to server" << std::endl;
             std::cout << "Waiting for data...\n" << std::endl;
         } else {
             std::cout << "✗ Client disconnected" << std::endl;
+            if (exit_on_disconnect) {
+                server.stop();
+            }
         }
     });
     
@@ -385,6 +403,11 @@ int main(int argc, char* argv[]) {
     uint64_t total_packets_received = 0;
     auto first_data_time = std::chrono::steady_clock::now();
     bool first_data_received = false;
+    
+    // Install signal handler for graceful shutdown
+    std::signal(SIGINT, [](int) {
+        // Signal handler will be set in main, but we'll handle it via should_stop
+    });
     
     server.run([&](const uint8_t* data, size_t size) {
         // Track first data received
@@ -482,13 +505,18 @@ int main(int argc, char* argv[]) {
                   << " disconnection(s) detected. This may cause data loss!" << std::endl;
     }
     
-    // Compare with expected data size if available
+    // Data reception summary with comparison guidance
     if (conn_stats.bytes_received > 0) {
         std::cout << "\n" << std::string(60, '=') << std::endl;
         std::cout << "Data Reception Summary:" << std::endl;
         std::cout << "  Parser received: " << std::fixed << std::setprecision(2)
                   << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB" << std::endl;
-        std::cout << "  Compare with SERVAL .tpx3 file size to check for data loss." << std::endl;
+        std::cout << "  (" << conn_stats.bytes_received << " bytes)" << std::endl;
+        std::cout << std::endl;
+        std::cout << "  To check for data loss:" << std::endl;
+        std::cout << "  1. Compare with SERVAL .tpx3 file size" << std::endl;
+        std::cout << "  2. If parser received < file size, data was lost" << std::endl;
+        std::cout << "  3. Possible causes: TCP buffer overruns, processing bottleneck" << std::endl;
         std::cout << std::string(60, '=') << std::endl;
     }
     
