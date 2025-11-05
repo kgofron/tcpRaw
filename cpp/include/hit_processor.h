@@ -59,6 +59,7 @@ private:
     std::vector<PixelHit> hits_;
     Statistics stats_;
     uint64_t start_time_ns_;  // Time when statistics started (for cumulative rates)
+    uint64_t tdc1_start_time_ns_;  // Time when first TDC1 event arrived (for TDC1 cumulative rate)
     uint64_t last_update_time_ns_;
     uint64_t hits_at_last_update_;
     uint64_t tdc1_events_at_last_update_;

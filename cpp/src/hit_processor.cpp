@@ -34,6 +34,7 @@ void HitProcessor::resetStatistics() {
     stats_.chip_tdc1_counts.clear();
     stats_.chip_tdc1_rates_hz.clear();
     start_time_ns_ = 0;  // Will be initialized on first hit to exclude idle time
+    tdc1_start_time_ns_ = 0;  // Will be initialized on first TDC1 event
     last_update_time_ns_ = 0;
     hits_at_last_update_ = 0;
     tdc1_events_at_last_update_ = 0;
@@ -83,6 +84,12 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
     
     // Track TDC1 events separately (RISE and FALL)
     if (tdc.type == TDC1_RISE || tdc.type == TDC1_FALL) {
+        // Initialize TDC1 start time on first TDC1 event
+        if (tdc1_start_time_ns_ == 0) {
+            auto now = std::chrono::steady_clock::now();
+            tdc1_start_time_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now.time_since_epoch()).count();
+        }
         stats_.total_tdc1_events++;
         stats_.chip_tdc1_counts[chip_index]++;  // Track per-chip TDC1 counts
     }
@@ -123,9 +130,21 @@ void HitProcessor::updateHitRate() {
             
             // Cumulative average rates (total counts / total elapsed time)
             stats_.cumulative_hit_rate_hz = stats_.total_hits / total_elapsed_seconds;
-            stats_.cumulative_tdc1_rate_hz = stats_.total_tdc1_events / total_elapsed_seconds;
             stats_.cumulative_tdc2_rate_hz = stats_.total_tdc2_events / total_elapsed_seconds;
         }
+    }
+    
+    // Use separate timer for TDC1 cumulative rate (started on first TDC1 event)
+    // This ensures TDC1 rate excludes time before TDC1 events begin
+    if (tdc1_start_time_ns_ > 0) {
+        uint64_t tdc1_elapsed_ns = current_time_ns - tdc1_start_time_ns_;
+        if (tdc1_elapsed_ns > 0) {
+            double tdc1_elapsed_seconds = tdc1_elapsed_ns / 1e9;
+            stats_.cumulative_tdc1_rate_hz = stats_.total_tdc1_events / tdc1_elapsed_seconds;
+        }
+    } else if (stats_.total_tdc1_events == 0) {
+        // No TDC1 events yet
+        stats_.cumulative_tdc1_rate_hz = 0.0;
     }
     
     if (last_update_time_ns_ == 0 || last_update_time_ns_ == start_time_ns_) {
