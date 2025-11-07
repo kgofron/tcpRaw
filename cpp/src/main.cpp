@@ -26,6 +26,8 @@
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 
 static std::string format_type_label(const std::string& prefix, uint8_t type) {
     std::ostringstream oss;
@@ -380,6 +382,7 @@ int main(int argc, char* argv[]) {
     bool exit_on_disconnect = false; // Exit after connection closes (don't auto-reconnect)
     std::string input_file;
     bool file_mode = false;
+    std::filesystem::path file_path;
     
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
@@ -475,9 +478,11 @@ int main(int argc, char* argv[]) {
     TCPServer::ConnectionStats conn_stats{};
     
     if (file_mode) {
-        std::ifstream input(input_file, std::ios::binary);
+        file_path = std::filesystem::absolute(std::filesystem::path(input_file));
+        std::ifstream input(file_path, std::ios::binary);
         if (!input) {
-            std::cerr << "Failed to open input file: " << input_file << std::endl;
+            std::error_code ec(errno, std::generic_category());
+            std::cerr << "Failed to open input file: " << file_path << " (" << ec.message() << ")" << std::endl;
             return 1;
         }
         std::cout << "Processing file...\n" << std::endl;
@@ -647,6 +652,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         });
+        g_server = nullptr;
         
         if (!first_data_received) {
             std::cout << "\n[WARNING] No data was received from SERVAL!" << std::endl;
@@ -689,7 +695,7 @@ int main(int argc, char* argv[]) {
     }
     
     if (file_mode) {
-        std::cout << "\nSource file: " << input_file << std::endl;
+        std::cout << "\nSource file: " << file_path << std::endl;
     } else {
         std::cout << "\n=== Connection Statistics ===" << std::endl;
         std::cout << "Connection attempts: " << conn_stats.connection_attempts << std::endl;
