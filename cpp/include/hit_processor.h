@@ -86,6 +86,8 @@ private:
     std::map<uint8_t, uint64_t> chip_hits_at_last_update_;
     std::map<uint8_t, uint64_t> chip_tdc1_at_last_update_;
     uint64_t calls_since_last_update_;
+    uint64_t last_hit_time_ticks_;
+    uint64_t last_tdc1_time_ticks_;
     
     void updateHitRate();
 };
