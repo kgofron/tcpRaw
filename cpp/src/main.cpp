@@ -34,6 +34,19 @@ static std::string format_type_label(const std::string& prefix, uint8_t type) {
     return oss.str();
 }
 
+struct StreamState {
+    bool in_chunk = false;
+    size_t chunk_words_remaining = 0;
+    uint8_t chip_index = 0;
+    uint64_t current_chunk_id = 0;
+    ChunkMetadata chunk_meta{};
+    std::vector<ExtraTimestamp> extra_timestamps;
+
+    StreamState() {
+        extra_timestamps.reserve(3);
+    }
+};
+
 // Helper function to process a single packet (used by reorder buffer callback)
 void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, ChunkMetadata& chunk_meta) {
     // Check full-byte types first (0x50, 0x71, etc. that can't be distinguished by 4-bit)
@@ -149,17 +162,10 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
 }
 
 // Process raw data buffer
-void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, ChunkMetadata& chunk_meta,
-                      PacketReorderBuffer* reorder_buffer = nullptr, uint64_t /* current_chunk_count */ = 0) {
+void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, StreamState& state,
+                      PacketReorderBuffer* reorder_buffer = nullptr) {
     const uint64_t* data_words = reinterpret_cast<const uint64_t*>(buffer);
     size_t num_words = bytes / 8;
-    
-    bool in_chunk = false;
-    size_t chunk_words_remaining = 0;
-    uint8_t chip_index = 0;
-    
-    // Track extra timestamp packets at end of chunk
-    std::vector<ExtraTimestamp> extra_timestamps;
     
     for (size_t i = 0; i < num_words; ++i) {
         uint64_t word = data_words[i];
@@ -174,47 +180,49 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
             // Note: chunk size includes the header word itself
             // So we set chunk_words_remaining to chunkSize/8, which includes header
             // We then continue to skip the header, so we process (chunkSize/8 - 1) data words
-            in_chunk = true;
-            chunk_words_remaining = header.chunkSize() / 8;
-            chip_index = header.chipIndex();
+            state.in_chunk = true;
+            state.chunk_words_remaining = header.chunkSize() / 8;
+            state.chip_index = header.chipIndex();
             processor.incrementChunkCount();
+            state.current_chunk_id = processor.getStatistics().total_chunks;
             
             // If we have a reorder buffer, reset it for new chunk
             if (reorder_buffer) {
-                reorder_buffer->resetForNewChunk(processor.getStatistics().total_chunks);
+                reorder_buffer->resetForNewChunk(state.current_chunk_id);
             }
             
             // Reset chunk metadata
-            chunk_meta.has_extra_packets = false;
-            extra_timestamps.clear();
+            state.chunk_meta = {};
+            state.extra_timestamps.clear();
             
             continue;
         }
         
-        if (!in_chunk || chunk_words_remaining == 0) {
+        if (!state.in_chunk || state.chunk_words_remaining == 0) {
+            processor.addPacketBytes("Unassigned (outside chunk)", 8);
             continue;
         }
         
-        chunk_words_remaining--;
+        state.chunk_words_remaining--;
         
         // Check if we're near the end of chunk (last 3 words are extra timestamps)
-        bool is_near_end = (chunk_words_remaining <= 3);
+        bool is_near_end = (state.chunk_words_remaining <= 3);
         
         if (is_near_end && ((word >> 56) == EXTRA_TIMESTAMP || (word >> 56) == EXTRA_TIMESTAMP_MPX3)) {
             uint8_t extra_type = static_cast<uint8_t>((word >> 56) & 0xFF);
             processor.addPacketBytes(format_type_label("Extra timestamp", extra_type), 8);
             // This is an extra timestamp packet
             ExtraTimestamp extra_ts = decode_extra_timestamp(word);
-            extra_timestamps.push_back(extra_ts);
+            state.extra_timestamps.push_back(extra_ts);
             
             // When we have all 3 extra packets, process them
-            if (extra_timestamps.size() == 3) {
-                chunk_meta.has_extra_packets = true;
-                chunk_meta.packet_gen_time_ns = extra_timestamps[0].timestamp_ns;
-                chunk_meta.min_timestamp_ns = extra_timestamps[1].timestamp_ns;
-                chunk_meta.max_timestamp_ns = extra_timestamps[2].timestamp_ns;
+            if (state.extra_timestamps.size() == 3) {
+                state.chunk_meta.has_extra_packets = true;
+                state.chunk_meta.packet_gen_time_ns = state.extra_timestamps[0].timestamp_ns;
+                state.chunk_meta.min_timestamp_ns = state.extra_timestamps[1].timestamp_ns;
+                state.chunk_meta.max_timestamp_ns = state.extra_timestamps[2].timestamp_ns;
                 
-                processor.processChunkMetadata(chunk_meta);
+                processor.processChunkMetadata(state.chunk_meta);
             }
         } else {
             // Regular packet processing
@@ -224,19 +232,19 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
             
             if (is_spidr_packet_id && reorder_buffer) {
                 // Use reorder buffer for SPIDR packet ID packets
-                reorder_buffer->processPacket(word, packet_count, processor.getStatistics().total_chunks,
-                    [&processor, &chunk_meta, chip_index](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
+                reorder_buffer->processPacket(word, packet_count, state.current_chunk_id,
+                    [&processor, &state](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
                         // Callback: process reordered packet
-                        process_packet(w, chip_index, processor, chunk_meta);
+                        process_packet(w, state.chip_index, processor, state.chunk_meta);
                     });
             } else {
                 // Process immediately (not SPIDR packet ID or reordering disabled)
-                process_packet(word, chip_index, processor, chunk_meta);
+                process_packet(word, state.chip_index, processor, state.chunk_meta);
             }
         }
         
-        if (chunk_words_remaining == 0) {
-            in_chunk = false;
+        if (state.chunk_words_remaining == 0) {
+            state.in_chunk = false;
         }
     }
     
@@ -449,7 +457,7 @@ int main(int argc, char* argv[]) {
     }
     
     HitProcessor processor;
-    ChunkMetadata chunk_meta;
+    StreamState stream_state;
     
     std::unique_ptr<PacketReorderBuffer> reorder_buffer;
     if (enable_reorder) {
@@ -503,8 +511,8 @@ int main(int argc, char* argv[]) {
                 data_ptr += to_copy;
                 remaining -= to_copy;
                 if (leftover.size() == 8) {
-                    process_raw_data(leftover.data(), 8, processor, chunk_meta,
-                        reorder_buffer ? reorder_buffer.get() : nullptr, 0);
+                    process_raw_data(leftover.data(), 8, processor, stream_state,
+                        reorder_buffer ? reorder_buffer.get() : nullptr);
                     total_packets_received += 1;
                     words_processed_this_chunk += 1;
                     leftover.clear();
@@ -513,8 +521,8 @@ int main(int argc, char* argv[]) {
             
             size_t aligned = (remaining / 8) * 8;
             if (aligned > 0) {
-                process_raw_data(data_ptr, aligned, processor, chunk_meta,
-                        reorder_buffer ? reorder_buffer.get() : nullptr, 0);
+                process_raw_data(data_ptr, aligned, processor, stream_state,
+                        reorder_buffer ? reorder_buffer.get() : nullptr);
                 size_t words = aligned / 8;
                 total_packets_received += words;
                 words_processed_this_chunk += words;
@@ -609,8 +617,8 @@ int main(int argc, char* argv[]) {
             total_bytes_received += size;
             total_packets_received += (size / 8);
             
-            process_raw_data(data, size, processor, chunk_meta,
-                            reorder_buffer ? reorder_buffer.get() : nullptr, 0);
+            process_raw_data(data, size, processor, stream_state,
+                            reorder_buffer ? reorder_buffer.get() : nullptr);
             
             if (!stats_disable && stats_interval > 0 && !stats_final_only) {
                 print_counter += (size / 8);
