@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <limits>
 
 struct Statistics {
     uint64_t total_hits;
@@ -37,6 +38,12 @@ struct Statistics {
     std::map<uint8_t, double> chip_tdc1_rates_hz;  // Per-chip TDC1 rates
     std::map<std::string, uint64_t> packet_byte_totals; // Bytes accounted per packet category
     uint64_t total_bytes_accounted;  // Total bytes accounted across all categories
+    uint64_t earliest_hit_time_ticks;
+    uint64_t latest_hit_time_ticks;
+    bool hit_time_initialized;
+    uint64_t earliest_tdc1_time_ticks;
+    uint64_t latest_tdc1_time_ticks;
+    bool tdc1_time_initialized;
     uint64_t total_reordered_packets;  // Packets processed out of order
     uint64_t reorder_max_distance;     // Maximum reorder distance observed
     uint64_t reorder_buffer_overflows; // Number of times reorder buffer overflowed

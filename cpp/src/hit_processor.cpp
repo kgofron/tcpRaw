@@ -8,6 +8,7 @@
 
 #include "hit_processor.h"
 #include <chrono>
+#include <limits>
 
 HitProcessor::HitProcessor() {
     resetStatistics();
@@ -35,6 +36,12 @@ void HitProcessor::resetStatistics() {
     stats_.chip_tdc1_rates_hz.clear();
     stats_.packet_byte_totals.clear();
     stats_.total_bytes_accounted = 0;
+    stats_.earliest_hit_time_ticks = std::numeric_limits<uint64_t>::max();
+    stats_.latest_hit_time_ticks = 0;
+    stats_.hit_time_initialized = false;
+    stats_.earliest_tdc1_time_ticks = std::numeric_limits<uint64_t>::max();
+    stats_.latest_tdc1_time_ticks = 0;
+    stats_.tdc1_time_initialized = false;
     stats_.total_reordered_packets = 0;
     stats_.reorder_max_distance = 0;
     stats_.reorder_buffer_overflows = 0;
@@ -71,6 +78,13 @@ void HitProcessor::addHit(const PixelHit& hit) {
         updateHitRate();
         calls_since_last_update_ = 0;
     }
+    if (!stats_.hit_time_initialized || hit.toa_ns < stats_.earliest_hit_time_ticks) {
+        stats_.earliest_hit_time_ticks = hit.toa_ns;
+        stats_.hit_time_initialized = true;
+    }
+    if (hit.toa_ns > stats_.latest_hit_time_ticks) {
+        stats_.latest_hit_time_ticks = hit.toa_ns;
+    }
 }
 
 void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
@@ -90,11 +104,12 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
     
     // Track TDC1 events separately (RISE and FALL)
     if (tdc.type == TDC1_RISE || tdc.type == TDC1_FALL) {
-        // Initialize TDC1 start time on first TDC1 event
-        if (tdc1_start_time_ns_ == 0) {
-            auto now = std::chrono::steady_clock::now();
-            tdc1_start_time_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                now.time_since_epoch()).count();
+        if (!stats_.tdc1_time_initialized || tdc.timestamp_ns < stats_.earliest_tdc1_time_ticks) {
+            stats_.earliest_tdc1_time_ticks = tdc.timestamp_ns;
+            stats_.tdc1_time_initialized = true;
+        }
+        if (tdc.timestamp_ns > stats_.latest_tdc1_time_ticks) {
+            stats_.latest_tdc1_time_ticks = tdc.timestamp_ns;
         }
         stats_.total_tdc1_events++;
         stats_.chip_tdc1_counts[chip_index]++;  // Track per-chip TDC1 counts
@@ -142,30 +157,39 @@ void HitProcessor::updateHitRate() {
     uint64_t current_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
     
-    // Always update cumulative rates based on total elapsed time (if we've started)
-    // This ensures cumulative rates are accurate even if updateHitRate is called infrequently
+    constexpr double TOA_UNIT_SECONDS = 1.5625e-9;
+    
+    // Always update cumulative rates based on data time when available; fall back to wall time
+    double data_elapsed_seconds_hits = 0.0;
+    if (stats_.hit_time_initialized && stats_.latest_hit_time_ticks > stats_.earliest_hit_time_ticks) {
+        data_elapsed_seconds_hits = (stats_.latest_hit_time_ticks - stats_.earliest_hit_time_ticks) * TOA_UNIT_SECONDS;
+    }
+    double data_elapsed_seconds_tdc1 = 0.0;
+    if (stats_.tdc1_time_initialized && stats_.latest_tdc1_time_ticks > stats_.earliest_tdc1_time_ticks) {
+        data_elapsed_seconds_tdc1 = (stats_.latest_tdc1_time_ticks - stats_.earliest_tdc1_time_ticks) * TOA_UNIT_SECONDS;
+    }
+    
+    if (data_elapsed_seconds_hits > 0.0) {
+        stats_.cumulative_hit_rate_hz = stats_.total_hits / data_elapsed_seconds_hits;
+    } else if (start_time_ns_ > 0) {
+        uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
+        if (total_elapsed_ns > 0) {
+            stats_.cumulative_hit_rate_hz = stats_.total_hits / (total_elapsed_ns / 1e9);
+        }
+    }
+    if (data_elapsed_seconds_tdc1 > 0.0) {
+        stats_.cumulative_tdc1_rate_hz = stats_.total_tdc1_events / data_elapsed_seconds_tdc1;
+    } else if (start_time_ns_ > 0) {
+        uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
+        if (total_elapsed_ns > 0) {
+            stats_.cumulative_tdc1_rate_hz = stats_.total_tdc1_events / (total_elapsed_ns / 1e9);
+        }
+    }
     if (start_time_ns_ > 0) {
         uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
         if (total_elapsed_ns > 0) {
-            double total_elapsed_seconds = total_elapsed_ns / 1e9;
-            
-            // Cumulative average rates (total counts / total elapsed time)
-            stats_.cumulative_hit_rate_hz = stats_.total_hits / total_elapsed_seconds;
-            stats_.cumulative_tdc2_rate_hz = stats_.total_tdc2_events / total_elapsed_seconds;
+            stats_.cumulative_tdc2_rate_hz = stats_.total_tdc2_events / (total_elapsed_ns / 1e9);
         }
-    }
-    
-    // Use separate timer for TDC1 cumulative rate (started on first TDC1 event)
-    // This ensures TDC1 rate excludes time before TDC1 events begin
-    if (tdc1_start_time_ns_ > 0) {
-        uint64_t tdc1_elapsed_ns = current_time_ns - tdc1_start_time_ns_;
-        if (tdc1_elapsed_ns > 0) {
-            double tdc1_elapsed_seconds = tdc1_elapsed_ns / 1e9;
-            stats_.cumulative_tdc1_rate_hz = stats_.total_tdc1_events / tdc1_elapsed_seconds;
-        }
-    } else if (stats_.total_tdc1_events == 0) {
-        // No TDC1 events yet
-        stats_.cumulative_tdc1_rate_hz = 0.0;
     }
     
     if (last_update_time_ns_ == 0 || last_update_time_ns_ == start_time_ns_) {
@@ -209,7 +233,9 @@ void HitProcessor::updateHitRate() {
             uint64_t last_count = chip_hits_at_last_update_.count(chip) 
                 ? chip_hits_at_last_update_[chip] : 0;
             uint64_t new_chip_hits = current_count - last_count;
-            stats_.chip_hit_rates_hz[chip] = new_chip_hits / elapsed_seconds;
+            if (elapsed_seconds > 0.0) {
+                stats_.chip_hit_rates_hz[chip] = new_chip_hits / elapsed_seconds;
+            }
         }
         
         // Update per-chip TDC1 rates
@@ -220,7 +246,9 @@ void HitProcessor::updateHitRate() {
             uint64_t last_count = chip_tdc1_at_last_update_.count(chip) 
                 ? chip_tdc1_at_last_update_[chip] : 0;
             uint64_t new_tdc1_events = current_count - last_count;
-            stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events / elapsed_seconds;
+            if (elapsed_seconds > 0.0) {
+                stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events / elapsed_seconds;
+            }
         }
         
         // Update last state
