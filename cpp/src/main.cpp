@@ -209,6 +209,15 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
             in_chunk = false;
         }
     }
+    
+    if (reorder_buffer) {
+        const auto& reorder_stats = reorder_buffer->getStatistics();
+        processor.updateReorderStats(
+            reorder_stats.packets_reordered,
+            reorder_stats.max_reorder_distance,
+            reorder_stats.buffer_overflows,
+            reorder_stats.packets_dropped_too_old);
+    }
 }
 
 void print_statistics(const HitProcessor& processor) {
@@ -244,6 +253,18 @@ void print_statistics(const HitProcessor& processor) {
               << stats.tdc2_rate_hz << " Hz" << std::endl;
     std::cout << "Tdc2 rate (cumulative avg): " << std::fixed << std::setprecision(2) 
               << stats.cumulative_tdc2_rate_hz << " Hz" << std::endl;
+    
+    if (stats.total_reordered_packets > 0 || stats.reorder_buffer_overflows > 0 ||
+        stats.reorder_packets_dropped_too_old > 0) {
+        std::cout << "Out-of-order packets (reordered): " << stats.total_reordered_packets << std::endl;
+        std::cout << "Max reorder distance: " << stats.reorder_max_distance << std::endl;
+        if (stats.reorder_buffer_overflows > 0) {
+            std::cout << "Reorder buffer overflows: " << stats.reorder_buffer_overflows << std::endl;
+        }
+        if (stats.reorder_packets_dropped_too_old > 0) {
+            std::cout << "Packets dropped as too old: " << stats.reorder_packets_dropped_too_old << std::endl;
+        }
+    }
     
     if (!stats.packet_type_counts.empty()) {
         std::cout << "Packet type breakdown:" << std::endl;

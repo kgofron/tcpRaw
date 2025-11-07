@@ -33,6 +33,10 @@ void HitProcessor::resetStatistics() {
     stats_.chip_hit_rates_hz.clear();
     stats_.chip_tdc1_counts.clear();
     stats_.chip_tdc1_rates_hz.clear();
+    stats_.total_reordered_packets = 0;
+    stats_.reorder_max_distance = 0;
+    stats_.reorder_buffer_overflows = 0;
+    stats_.reorder_packets_dropped_too_old = 0;
     start_time_ns_ = 0;  // Will be initialized on first hit to exclude idle time
     tdc1_start_time_ns_ = 0;  // Will be initialized on first TDC1 event
     last_update_time_ns_ = 0;
@@ -101,6 +105,16 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
     // Update cumulative rates immediately for TDC events
     // (Rate updates are throttled for hits, but TDC events are infrequent)
     updateHitRate();
+}
+
+void HitProcessor::updateReorderStats(uint64_t packets_reordered,
+                                      uint64_t max_reorder_distance,
+                                      uint64_t buffer_overflows,
+                                      uint64_t packets_dropped_too_old) {
+    stats_.total_reordered_packets = packets_reordered;
+    stats_.reorder_max_distance = max_reorder_distance;
+    stats_.reorder_buffer_overflows = buffer_overflows;
+    stats_.reorder_packets_dropped_too_old = packets_dropped_too_old;
 }
 
 void HitProcessor::incrementChunkCount() {

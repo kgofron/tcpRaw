@@ -34,6 +34,10 @@ struct Statistics {
     std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
     std::map<uint8_t, uint64_t> chip_tdc1_counts;  // Per-chip TDC1 event counts
     std::map<uint8_t, double> chip_tdc1_rates_hz;  // Per-chip TDC1 rates
+    uint64_t total_reordered_packets;  // Packets processed out of order
+    uint64_t reorder_max_distance;     // Maximum reorder distance observed
+    uint64_t reorder_buffer_overflows; // Number of times reorder buffer overflowed
+    uint64_t reorder_packets_dropped_too_old; // Packets dropped because they were too old
 };
 
 class HitProcessor {
@@ -48,6 +52,10 @@ public:
     void incrementFractionalError();
     void incrementUnknownPacket();
     void incrementPacketType(uint8_t packet_type);
+    void updateReorderStats(uint64_t packets_reordered,
+                            uint64_t max_reorder_distance,
+                            uint64_t buffer_overflows,
+                            uint64_t packets_dropped_too_old);
     
     const std::vector<PixelHit>& getHits() const { return hits_; }
     const Statistics& getStatistics() const { return stats_; }
