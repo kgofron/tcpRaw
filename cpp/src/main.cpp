@@ -254,17 +254,10 @@ void print_statistics(const HitProcessor& processor) {
     std::cout << "Tdc2 rate (cumulative avg): " << std::fixed << std::setprecision(2) 
               << stats.cumulative_tdc2_rate_hz << " Hz" << std::endl;
     
-    if (stats.total_reordered_packets > 0 || stats.reorder_buffer_overflows > 0 ||
-        stats.reorder_packets_dropped_too_old > 0) {
-        std::cout << "Out-of-order packets (reordered): " << stats.total_reordered_packets << std::endl;
-        std::cout << "Max reorder distance: " << stats.reorder_max_distance << std::endl;
-        if (stats.reorder_buffer_overflows > 0) {
-            std::cout << "Reorder buffer overflows: " << stats.reorder_buffer_overflows << std::endl;
-        }
-        if (stats.reorder_packets_dropped_too_old > 0) {
-            std::cout << "Packets dropped as too old: " << stats.reorder_packets_dropped_too_old << std::endl;
-        }
-    }
+    std::cout << "Out-of-order packets (reordered): " << stats.total_reordered_packets << std::endl;
+    std::cout << "Max reorder distance: " << stats.reorder_max_distance << std::endl;
+    std::cout << "Reorder buffer overflows: " << stats.reorder_buffer_overflows << std::endl;
+    std::cout << "Packets dropped as too old: " << stats.reorder_packets_dropped_too_old << std::endl;
     
     if (!stats.packet_type_counts.empty()) {
         std::cout << "Packet type breakdown:" << std::endl;
