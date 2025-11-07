@@ -22,6 +22,17 @@
 #include <memory>
 #include <csignal>
 #include <atomic>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <algorithm>
+
+static std::string format_type_label(const std::string& prefix, uint8_t type) {
+    std::ostringstream oss;
+    oss << prefix << " (0x" << std::hex << std::uppercase << std::setfill('0')
+        << std::setw(2) << static_cast<int>(type) << ")";
+    return oss.str();
+}
 
 // Helper function to process a single packet (used by reorder buffer callback)
 void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, ChunkMetadata& chunk_meta) {
@@ -29,6 +40,7 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     uint8_t full_type = (word >> 56) & 0xFF;
     
     if (full_type == SPIDR_PACKET_ID) {
+        processor.addPacketBytes("SPIDR packet ID (0x50)", 8);
         // SPIDR packet ID (0x50)
         uint64_t packet_count;
         if (decode_spidr_packet_id(word, packet_count)) {
@@ -38,6 +50,7 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     }
     
     if (full_type == TPX3_CONTROL) {
+        processor.addPacketBytes("TPX3 control (0x71)", 8);
         // TPX3 control (0x71)
         Tpx3ControlCmd cmd;
         if (decode_tpx3_control(word, cmd)) {
@@ -47,11 +60,13 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     }
     
     if (full_type == EXTRA_TIMESTAMP || full_type == EXTRA_TIMESTAMP_MPX3) {
+        processor.addPacketBytes(format_type_label("Extra timestamp", full_type), 8);
         // Extra timestamp packets - handled separately in main processing loop
         return;
     }
     
     if (full_type == GLOBAL_TIME_LOW || full_type == GLOBAL_TIME_HIGH) {
+        processor.addPacketBytes(format_type_label("Global time", full_type), 8);
         // GlobalTime gt = decode_global_time(word);
         // Future: Use for time extension
         return;
@@ -64,6 +79,11 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     switch (packet_type) {
         case PIXEL_COUNT_FB:
         case PIXEL_STANDARD: {
+            if (packet_type == PIXEL_COUNT_FB) {
+                processor.addPacketBytes("Pixel count_fb (0x0a)", 8);
+            } else {
+                processor.addPacketBytes("Pixel standard (0x0b)", 8);
+            }
             try {
                 PixelHit hit = decode_pixel_data(word, chip_index);
                 
@@ -87,6 +107,7 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
         }
         
         case TDC_DATA: {
+            processor.addPacketBytes("TDC data (0x06)", 8);
             try {
                 TDCEvent tdc = decode_tdc_data(word);
                 processor.addTdcEvent(tdc, chip_index);
@@ -107,6 +128,7 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
         }
         
         case SPIDR_CONTROL: {
+            processor.addPacketBytes("SPIDR control (0x05)", 8);
             SpidrControl ctrl;
             if (decode_spidr_control(word, ctrl)) {
                 processor.incrementChunkCount();
@@ -114,10 +136,15 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
             break;
         }
         
-        default:
+        default: {
+            std::ostringstream label;
+            label << "Unknown packet type (0x" << std::hex << std::uppercase
+                  << static_cast<int>(packet_type) << ")";
+            processor.addPacketBytes(label.str(), 8);
             // Unknown packet type
             processor.incrementUnknownPacket();
             break;
+        }
     }
 }
 
@@ -143,6 +170,7 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         
         if (header.isValid()) {
             // Found chunk header
+            processor.addPacketBytes("Chunk header", 8);
             // Note: chunk size includes the header word itself
             // So we set chunk_words_remaining to chunkSize/8, which includes header
             // We then continue to skip the header, so we process (chunkSize/8 - 1) data words
@@ -173,6 +201,8 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         bool is_near_end = (chunk_words_remaining <= 3);
         
         if (is_near_end && ((word >> 56) == EXTRA_TIMESTAMP || (word >> 56) == EXTRA_TIMESTAMP_MPX3)) {
+            uint8_t extra_type = static_cast<uint8_t>((word >> 56) & 0xFF);
+            processor.addPacketBytes(format_type_label("Extra timestamp", extra_type), 8);
             // This is an extra timestamp packet
             ExtraTimestamp extra_ts = decode_extra_timestamp(word);
             extra_timestamps.push_back(extra_ts);
@@ -291,6 +321,27 @@ void print_statistics(const HitProcessor& processor) {
         // Note: Per-chip rates sum may not equal detector-wide rate if different chips
         // have different activity periods. Detector-wide cumulative rate matches SERVAL.
     }
+    
+    if (!stats.packet_byte_totals.empty()) {
+        std::cout << "\n=== Packet Accounting ===" << std::endl;
+        std::cout << std::left << std::setw(35) << "Category"
+                  << std::right << std::setw(18) << "Bytes"
+                  << std::setw(12) << "%" << std::endl;
+        std::cout << std::string(65, '-') << std::endl;
+        double total_bytes = static_cast<double>(stats.total_bytes_accounted);
+        for (const auto& entry : stats.packet_byte_totals) {
+            double pct = (total_bytes > 0.0)
+                ? (static_cast<double>(entry.second) * 100.0 / total_bytes)
+                : 0.0;
+            std::cout << std::left << std::setw(35) << entry.first
+                      << std::right << std::setw(18) << entry.second
+                      << std::setw(11) << std::fixed << std::setprecision(2) << pct << std::endl;
+        }
+        std::cout << std::string(65, '-') << std::endl;
+        std::cout << std::left << std::setw(35) << "Total"
+                  << std::right << std::setw(18) << stats.total_bytes_accounted
+                  << std::setw(11) << "100.00" << std::endl;
+    }
 }
 
 void print_recent_hits(const HitProcessor& processor, size_t count) {
@@ -318,6 +369,8 @@ int main(int argc, char* argv[]) {
     bool stats_final_only = false; // Only print final statistics
     bool stats_disable = false;    // Completely disable statistics printing
     bool exit_on_disconnect = false; // Exit after connection closes (don't auto-reconnect)
+    std::string input_file;
+    bool file_mode = false;
     
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
@@ -343,11 +396,15 @@ int main(int argc, char* argv[]) {
             stats_time_interval = 0;
         } else if (arg == "--exit-on-disconnect") {
             exit_on_disconnect = true;
+        } else if (arg == "--input-file" && i + 1 < argc) {
+            input_file = argv[++i];
+            file_mode = true;
         } else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " [OPTIONS]" << std::endl;
             std::cout << "Connection options:" << std::endl;
             std::cout << "  --host HOST           TCP server host (default: 127.0.0.1)" << std::endl;
             std::cout << "  --port PORT           TCP server port (default: 8085)" << std::endl;
+            std::cout << "  --input-file PATH     Read data from .tpx3 file instead of TCP" << std::endl;
             std::cout << "Reordering options:" << std::endl;
             std::cout << "  --reorder             Enable packet reordering" << std::endl;
             std::cout << "  --reorder-window SIZE Reorder buffer window size (default: 1000)" << std::endl;
@@ -363,7 +420,11 @@ int main(int argc, char* argv[]) {
     }
     
     std::cout << "TPX3 Raw Data Parser" << std::endl;
-    std::cout << "Connecting to " << host << ":" << port << std::endl;
+    if (file_mode) {
+        std::cout << "Reading from file: " << input_file << std::endl;
+    } else {
+        std::cout << "Connecting to " << host << ":" << port << std::endl;
+    }
     std::cout << "Packet reordering: " << (enable_reorder ? "enabled" : "disabled");
     if (enable_reorder) {
         std::cout << " (window size: " << reorder_window_size << ")";
@@ -386,175 +447,275 @@ int main(int argc, char* argv[]) {
         std::cout << std::endl;
     }
     
-    TCPServer server(host, port);
-    
-    if (!server.initialize()) {
-        std::cerr << "Failed to initialize TCP server" << std::endl;
-        return 1;
-    }
-    
-    std::cout << "TCP client initialized, connecting to server..." << std::endl;
-    if (!stats_disable && !stats_final_only) {
-        std::cout << "Waiting for data...\n" << std::endl;
-    } else {
-        std::cout << "Waiting for data (high-rate mode)...\n" << std::endl;
-    }
-    
     HitProcessor processor;
     ChunkMetadata chunk_meta;
     
-    // Create reorder buffer if enabled
     std::unique_ptr<PacketReorderBuffer> reorder_buffer;
     if (enable_reorder) {
         reorder_buffer = std::make_unique<PacketReorderBuffer>(reorder_window_size, true);
     }
     
-    size_t print_counter = 0;
-    
-    auto last_status_print = std::chrono::steady_clock::now();
-    uint64_t last_hits = 0;
-    
-    // Signal handler for graceful shutdown (global variable needed for signal handler)
-    static TCPServer* g_server = &server;
-    signal(SIGINT, [](int) {
-        if (g_server) {
-            g_server->stop();
-        }
-        std::cout << "\n[SIGINT] Received interrupt signal, shutting down gracefully..." << std::endl;
-    });
-    
-    server.setConnectionCallback([&](bool connected) {
-        if (connected) {
-            std::cout << "✓ Client connected to server" << std::endl;
-            std::cout << "Waiting for data...\n" << std::endl;
-        } else {
-            std::cout << "✗ Client disconnected" << std::endl;
-            if (exit_on_disconnect) {
-                server.stop();
-            }
-        }
-    });
-    
     uint64_t total_bytes_received = 0;
     uint64_t total_packets_received = 0;
-    auto first_data_time = std::chrono::steady_clock::now();
+    uint64_t bytes_dropped_incomplete = 0;
     bool first_data_received = false;
+    auto first_data_time = std::chrono::steady_clock::now();
+    size_t print_counter = 0;
+    auto last_status_print = std::chrono::steady_clock::now();
+    uint64_t last_hits = 0;
+    TCPServer::ConnectionStats conn_stats{};
     
-    // Install signal handler for graceful shutdown
-    std::signal(SIGINT, [](int) {
-        // Signal handler will be set in main, but we'll handle it via should_stop
-    });
-    
-    server.run([&](const uint8_t* data, size_t size) {
-        // Track first data received
-        if (!first_data_received) {
-            first_data_received = true;
-            first_data_time = std::chrono::steady_clock::now();
-            std::cout << "[TCP] First data received: " << size << " bytes" << std::endl;
+    if (file_mode) {
+        std::ifstream input(input_file, std::ios::binary);
+        if (!input) {
+            std::cerr << "Failed to open input file: " << input_file << std::endl;
+            return 1;
         }
+        std::cout << "Processing file...\n" << std::endl;
+        const size_t buffer_size = 4 * 1024 * 1024;
+        std::vector<uint8_t> buffer(buffer_size);
+        std::vector<uint8_t> leftover;
+        leftover.reserve(8);
         
-        total_bytes_received += size;
-        total_packets_received += (size / 8);
-        
-        // Process raw data
-        process_raw_data(data, size, processor, chunk_meta, 
+        while (input) {
+            input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+            std::streamsize read = input.gcount();
+            if (read <= 0) {
+                break;
+            }
+            
+            if (!first_data_received) {
+                first_data_received = true;
+                first_data_time = std::chrono::steady_clock::now();
+                std::cout << "[FILE] First data chunk: " << read << " bytes" << std::endl;
+            }
+            
+            total_bytes_received += static_cast<uint64_t>(read);
+            const uint8_t* data_ptr = buffer.data();
+            size_t remaining = static_cast<size_t>(read);
+            size_t words_processed_this_chunk = 0;
+            
+            if (!leftover.empty()) {
+                size_t needed = 8 - leftover.size();
+                size_t to_copy = std::min(needed, remaining);
+                leftover.insert(leftover.end(), data_ptr, data_ptr + to_copy);
+                data_ptr += to_copy;
+                remaining -= to_copy;
+                if (leftover.size() == 8) {
+                    process_raw_data(leftover.data(), 8, processor, chunk_meta,
                         reorder_buffer ? reorder_buffer.get() : nullptr, 0);
-        
-        // Print periodic statistics (if enabled)
-        if (!stats_disable && stats_interval > 0 && !stats_final_only) {
-            print_counter += (size / 8);
-            if (print_counter >= stats_interval) {
-                std::cout << "\n[Periodic Statistics Update]" << std::endl;
-                print_statistics(processor);
-                std::cout << std::endl;
-                print_counter = 0;
+                    total_packets_received += 1;
+                    words_processed_this_chunk += 1;
+                    leftover.clear();
+                }
+            }
+            
+            size_t aligned = (remaining / 8) * 8;
+            if (aligned > 0) {
+                process_raw_data(data_ptr, aligned, processor, chunk_meta,
+                        reorder_buffer ? reorder_buffer.get() : nullptr, 0);
+                size_t words = aligned / 8;
+                total_packets_received += words;
+                words_processed_this_chunk += words;
+                data_ptr += aligned;
+                remaining -= aligned;
+            }
+            
+            if (remaining > 0) {
+                leftover.assign(data_ptr, data_ptr + remaining);
+            }
+            
+            if (!stats_disable && stats_interval > 0 && !stats_final_only) {
+                print_counter += words_processed_this_chunk;
+                if (print_counter >= stats_interval) {
+                    std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                    print_statistics(processor);
+                    std::cout << std::endl;
+                    print_counter = 0;
+                }
+            }
+            
+            if (!stats_disable && stats_time_interval > 0) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - last_status_print).count();
+                if (elapsed >= stats_time_interval) {
+                    const Statistics& stats = processor.getStatistics();
+                    uint64_t hits_diff = stats.total_hits - last_hits;
+                    std::cout << "[Status] Processed " << hits_diff << " hits in last "
+                              << stats_time_interval << "s" << std::endl;
+                    std::cout << "[Status] Total bytes processed: " << total_bytes_received
+                              << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+                    std::cout << "[Status] Total packets (words) processed: " << total_packets_received << std::endl;
+                    last_hits = stats.total_hits;
+                    last_status_print = now;
+                }
             }
         }
         
-        // Print status at intervals (if enabled)
-        if (!stats_disable && stats_time_interval > 0) {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                now - last_status_print).count();
-            if (elapsed >= stats_time_interval) {
-                const Statistics& stats = processor.getStatistics();
-                uint64_t hits_diff = stats.total_hits - last_hits;
-                std::cout << "[Status] Processed " << hits_diff << " hits in last " 
-                          << stats_time_interval << "s" << std::endl;
-                std::cout << "[Status] Total bytes received: " << total_bytes_received 
-                          << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
-                std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
-                last_hits = stats.total_hits;
-                last_status_print = now;
-            }
+        if (input.bad()) {
+            std::cerr << "Error reading input file: " << input_file << std::endl;
+            return 1;
         }
-    });
-    
-    // Print summary if no data was received
-    if (!first_data_received) {
-        std::cout << "\n[WARNING] No data was received from SERVAL!" << std::endl;
-        std::cout << "Possible causes:" << std::endl;
-        std::cout << "  1. SERVAL is not configured to send data to port " << port << std::endl;
-        std::cout << "  2. SERVAL is not actively sending data" << std::endl;
-        std::cout << "  3. Check SERVAL configuration and status" << std::endl;
+        
+        if (!leftover.empty()) {
+            bytes_dropped_incomplete += leftover.size();
+            std::cerr << "[WARNING] Ignoring " << leftover.size()
+                      << " trailing byte(s) not forming a full 8-byte word" << std::endl;
+        }
+    } else {
+        TCPServer server(host, port);
+        
+        if (!server.initialize()) {
+            std::cerr << "Failed to initialize TCP server" << std::endl;
+            return 1;
+        }
+        
+        std::cout << "TCP client initialized, connecting to server..." << std::endl;
+        if (!stats_disable && !stats_final_only) {
+            std::cout << "Waiting for data...\n" << std::endl;
+        } else {
+            std::cout << "Waiting for data (high-rate mode)...\n" << std::endl;
+        }
+        
+        static TCPServer* g_server = &server;
+        signal(SIGINT, [](int) {
+            if (g_server) {
+                g_server->stop();
+            }
+            std::cout << "\n[SIGINT] Received interrupt signal, shutting down gracefully..." << std::endl;
+        });
+        
+        server.setConnectionCallback([&](bool connected) {
+            if (connected) {
+                std::cout << "✓ Client connected to server" << std::endl;
+                std::cout << "Waiting for data...\n" << std::endl;
+            } else {
+                std::cout << "✗ Client disconnected" << std::endl;
+                if (exit_on_disconnect) {
+                    server.stop();
+                }
+            }
+        });
+        
+        server.run([&](const uint8_t* data, size_t size) {
+            if (!first_data_received) {
+                first_data_received = true;
+                first_data_time = std::chrono::steady_clock::now();
+                std::cout << "[TCP] First data received: " << size << " bytes" << std::endl;
+            }
+            
+            total_bytes_received += size;
+            total_packets_received += (size / 8);
+            
+            process_raw_data(data, size, processor, chunk_meta,
+                            reorder_buffer ? reorder_buffer.get() : nullptr, 0);
+            
+            if (!stats_disable && stats_interval > 0 && !stats_final_only) {
+                print_counter += (size / 8);
+                if (print_counter >= stats_interval) {
+                    std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                    print_statistics(processor);
+                    std::cout << std::endl;
+                    print_counter = 0;
+                }
+            }
+            
+            if (!stats_disable && stats_time_interval > 0) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - last_status_print).count();
+                if (elapsed >= stats_time_interval) {
+                    const Statistics& stats = processor.getStatistics();
+                    uint64_t hits_diff = stats.total_hits - last_hits;
+                    std::cout << "[Status] Processed " << hits_diff << " hits in last "
+                              << stats_time_interval << "s" << std::endl;
+                    std::cout << "[Status] Total bytes received: " << total_bytes_received
+                              << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+                    std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
+                    last_hits = stats.total_hits;
+                    last_status_print = now;
+                }
+            }
+        });
+        
+        if (!first_data_received) {
+            std::cout << "\n[WARNING] No data was received from SERVAL!" << std::endl;
+            std::cout << "Possible causes:" << std::endl;
+            std::cout << "  1. SERVAL is not configured to send data to port " << port << std::endl;
+            std::cout << "  2. SERVAL is not actively sending data" << std::endl;
+            std::cout << "  3. Check SERVAL configuration and status" << std::endl;
+        }
+        
+        conn_stats = server.getConnectionStats();
+        bytes_dropped_incomplete = conn_stats.bytes_dropped_incomplete;
+        total_bytes_received = conn_stats.bytes_received;
     }
     
-    // Print final summary
-    const auto& conn_stats = server.getConnectionStats();
+    if (!first_data_received) {
+        if (file_mode) {
+            std::cout << "\n[WARNING] The input file contained no data." << std::endl;
+        }
+        // For TCP mode a message has already been printed above.
+    }
+    
     std::cout << "\n" << std::string(60, '=') << std::endl;
     std::cout << "=== FINAL SUMMARY ===" << std::endl;
     std::cout << std::string(60, '=') << std::endl;
-    std::cout << "Total bytes received: " << conn_stats.bytes_received 
-              << " (" << std::fixed << std::setprecision(2) 
-              << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
-    std::cout << "Total packets (words) received: " << total_packets_received << std::endl;
-    if (conn_stats.bytes_dropped_incomplete > 0) {
-        std::cout << "Bytes dropped (incomplete words): " << conn_stats.bytes_dropped_incomplete 
+    std::cout << "Total bytes processed: " << total_bytes_received
+              << " (" << std::fixed << std::setprecision(2)
+              << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+    std::cout << "Total packets (words) processed: " << total_packets_received << std::endl;
+    if (bytes_dropped_incomplete > 0) {
+        std::cout << "Bytes dropped (incomplete words): " << bytes_dropped_incomplete
                   << " (" << std::fixed << std::setprecision(2)
-                  << (conn_stats.bytes_dropped_incomplete / 1024.0) << " KB)" << std::endl;
+                  << (bytes_dropped_incomplete / 1024.0) << " KB)" << std::endl;
     }
     std::cout << std::endl;
     
-    // Print final statistics (unless completely disabled)
     if (!stats_disable) {
         std::cout << "=== Final Statistics ===" << std::endl;
         print_statistics(processor);
         print_recent_hits(processor, 10);
     }
     
-    // Print connection statistics
-    std::cout << "\n=== Connection Statistics ===" << std::endl;
-    std::cout << "Connection attempts: " << conn_stats.connection_attempts << std::endl;
-    std::cout << "Successful connections: " << conn_stats.successful_connections << std::endl;
-    std::cout << "Disconnections: " << conn_stats.disconnections << std::endl;
-    std::cout << "Reconnect errors: " << conn_stats.reconnect_errors << std::endl;
-    std::cout << "recv() errors: " << conn_stats.recv_errors << std::endl;
-    
-    if (conn_stats.bytes_dropped_incomplete > 0) {
-        std::cout << "\n⚠️  WARNING: " << conn_stats.bytes_dropped_incomplete 
-                  << " bytes were dropped due to incomplete 8-byte words!" << std::endl;
-        std::cout << "   This may indicate TCP packet fragmentation issues." << std::endl;
+    if (file_mode) {
+        std::cout << "\nSource file: " << input_file << std::endl;
+    } else {
+        std::cout << "\n=== Connection Statistics ===" << std::endl;
+        std::cout << "Connection attempts: " << conn_stats.connection_attempts << std::endl;
+        std::cout << "Successful connections: " << conn_stats.successful_connections << std::endl;
+        std::cout << "Disconnections: " << conn_stats.disconnections << std::endl;
+        std::cout << "Reconnect errors: " << conn_stats.reconnect_errors << std::endl;
+        std::cout << "recv() errors: " << conn_stats.recv_errors << std::endl;
+        
+        if (conn_stats.bytes_dropped_incomplete > 0) {
+            std::cout << "\n⚠️  WARNING: " << conn_stats.bytes_dropped_incomplete
+                      << " bytes were dropped due to incomplete 8-byte words!" << std::endl;
+            std::cout << "   This may indicate TCP packet fragmentation issues." << std::endl;
+        }
+        
+        if (conn_stats.disconnections > 0) {
+            std::cout << "\n⚠️  WARNING: " << conn_stats.disconnections
+                      << " disconnection(s) detected. This may cause data loss!" << std::endl;
+        }
     }
     
-    if (conn_stats.disconnections > 0) {
-        std::cout << "\n⚠️  WARNING: " << conn_stats.disconnections 
-                  << " disconnection(s) detected. This may cause data loss!" << std::endl;
-    }
-    
-    // Data reception summary with comparison guidance
-    if (conn_stats.bytes_received > 0) {
-        std::cout << "\n" << std::string(60, '=') << std::endl;
-        std::cout << "Data Reception Summary:" << std::endl;
-        std::cout << "  Parser received: " << std::fixed << std::setprecision(2)
-                  << (conn_stats.bytes_received / 1024.0 / 1024.0) << " MB" << std::endl;
-        std::cout << "  (" << conn_stats.bytes_received << " bytes)" << std::endl;
-        std::cout << std::endl;
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << (file_mode ? "Data Processing Summary:" : "Data Reception Summary:") << std::endl;
+    std::cout << "  Parser processed: " << std::fixed << std::setprecision(2)
+              << (total_bytes_received / 1024.0 / 1024.0) << " MB" << std::endl;
+    std::cout << "  (" << total_bytes_received << " bytes)" << std::endl;
+    std::cout << std::endl;
+    if (!file_mode) {
         std::cout << "  To check for data loss:" << std::endl;
         std::cout << "  1. Compare with SERVAL .tpx3 file size" << std::endl;
         std::cout << "  2. If parser received < file size, data was lost" << std::endl;
         std::cout << "  3. Possible causes: TCP buffer overruns, processing bottleneck" << std::endl;
-        std::cout << std::string(60, '=') << std::endl;
+    } else {
+        std::cout << "  Compare these totals with live TCP capture to detect discrepancies." << std::endl;
     }
+    std::cout << std::string(60, '=') << std::endl;
     
     return 0;
 }

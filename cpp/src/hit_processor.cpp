@@ -33,6 +33,8 @@ void HitProcessor::resetStatistics() {
     stats_.chip_hit_rates_hz.clear();
     stats_.chip_tdc1_counts.clear();
     stats_.chip_tdc1_rates_hz.clear();
+    stats_.packet_byte_totals.clear();
+    stats_.total_bytes_accounted = 0;
     stats_.total_reordered_packets = 0;
     stats_.reorder_max_distance = 0;
     stats_.reorder_buffer_overflows = 0;
@@ -115,6 +117,11 @@ void HitProcessor::updateReorderStats(uint64_t packets_reordered,
     stats_.reorder_max_distance = max_reorder_distance;
     stats_.reorder_buffer_overflows = buffer_overflows;
     stats_.reorder_packets_dropped_too_old = packets_dropped_too_old;
+}
+
+void HitProcessor::addPacketBytes(const std::string& category, uint64_t bytes) {
+    stats_.packet_byte_totals[category] += bytes;
+    stats_.total_bytes_accounted += bytes;
 }
 
 void HitProcessor::incrementChunkCount() {

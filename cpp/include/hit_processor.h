@@ -13,6 +13,7 @@
 #include <vector>
 #include <cstdint>
 #include <map>
+#include <string>
 
 struct Statistics {
     uint64_t total_hits;
@@ -34,6 +35,8 @@ struct Statistics {
     std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
     std::map<uint8_t, uint64_t> chip_tdc1_counts;  // Per-chip TDC1 event counts
     std::map<uint8_t, double> chip_tdc1_rates_hz;  // Per-chip TDC1 rates
+    std::map<std::string, uint64_t> packet_byte_totals; // Bytes accounted per packet category
+    uint64_t total_bytes_accounted;  // Total bytes accounted across all categories
     uint64_t total_reordered_packets;  // Packets processed out of order
     uint64_t reorder_max_distance;     // Maximum reorder distance observed
     uint64_t reorder_buffer_overflows; // Number of times reorder buffer overflowed
@@ -56,6 +59,7 @@ public:
                             uint64_t max_reorder_distance,
                             uint64_t buffer_overflows,
                             uint64_t packets_dropped_too_old);
+    void addPacketBytes(const std::string& category, uint64_t bytes);
     
     const std::vector<PixelHit>& getHits() const { return hits_; }
     const Statistics& getStatistics() const { return stats_; }
