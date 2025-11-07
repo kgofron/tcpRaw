@@ -324,6 +324,7 @@ void print_statistics(const HitProcessor& processor) {
     
     if (!stats.packet_byte_totals.empty()) {
         std::cout << "\n=== Packet Accounting ===" << std::endl;
+        std::cout << std::setfill(' ');
         std::cout << std::left << std::setw(35) << "Category"
                   << std::right << std::setw(18) << "Bytes"
                   << std::setw(12) << "%" << std::endl;
