@@ -3,7 +3,7 @@
 **Author:** Kazimierz Gofron  
 **Institution:** Oak Ridge National Laboratory  
 **Created:** November 2, 2025  
-**Modified:** November 4, 2025
+**Modified:** November 8, 2025
 
 This directory contains test programs, scripts, documentation, and results for analyzing the TPX3 raw data protocol and comparing with the real-time parser.
 
@@ -15,9 +15,9 @@ test/
 │   └── tcp_raw_test.cpp    # Comprehensive protocol analysis tool
 ├── scripts/                # Comparison and test scripts
 │   ├── run_comparison.sh   # Main comparison script (dual socket)
-│   ├── compare_tools.sh    # Detailed comparison script
 │   ├── run_comparison_now.sh # Quick comparison wrapper
-│   └── tcp_stream_duplicator.py # TCP stream duplication tool
+│   ├── tcp_stream_duplicator.py # TCP stream duplication tool
+│   └── compare_summaries.py # Offline summary comparison helper
 ├── docs/                   # Test documentation
 │   ├── RESULTS_ANALYSIS.md # Analysis of test results
 │   └── SERVAL_CONFIGURATION.md # SERVAL setup instructions
@@ -64,6 +64,17 @@ cd cpp/test/scripts
 ```
 
 ### Manual Testing
+### Offline Summary Diff
+
+Use the Python helper to compare a live TCP summary against a `.tpx3` replay:
+
+```bash
+python3 cpp/test/scripts/compare_summaries.py \
+  --baseline /path/to/file_summary.md \
+  --candidate /path/to/tcp_summary.md
+```
+
+The tool highlights deltas for total bytes, hits, TDC events, and per-chip TDC1 metrics and warns if the candidate run attached mid-stream.
 
 **Terminal 1 (Test Tool):**
 ```bash

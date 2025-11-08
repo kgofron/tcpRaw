@@ -43,6 +43,8 @@ struct StreamState {
     uint64_t current_chunk_id = 0;
     ChunkMetadata chunk_meta{};
     std::vector<ExtraTimestamp> extra_timestamps;
+    bool saw_first_chunk_header = false;
+    bool mid_stream_flagged = false;
 
     StreamState() {
         extra_timestamps.reserve(3);
@@ -179,6 +181,7 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         if (header.isValid()) {
             // Found chunk header
             processor.addPacketBytes("Chunk header", 8);
+            state.saw_first_chunk_header = true;
             // Note: chunk size includes the header word itself
             // So we set chunk_words_remaining to chunkSize/8, which includes header
             // We then continue to skip the header, so we process (chunkSize/8 - 1) data words
@@ -201,6 +204,10 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         }
         
         if (!state.in_chunk || state.chunk_words_remaining == 0) {
+            if (!state.saw_first_chunk_header && !state.mid_stream_flagged) {
+                processor.markMidStreamStart();
+                state.mid_stream_flagged = true;
+            }
             processor.addPacketBytes("Unassigned (outside chunk)", 8);
             continue;
         }
@@ -294,6 +301,25 @@ void print_statistics(const HitProcessor& processor) {
     std::cout << "Tdc2 rate (cumulative avg): " << std::fixed << std::setprecision(2) 
               << stats.cumulative_tdc2_rate_hz << " Hz" << std::endl;
     
+    constexpr double TOA_UNIT_SECONDS = 1.5625e-9;
+    if (stats.hit_time_initialized && stats.latest_hit_time_ticks > stats.earliest_hit_time_ticks) {
+        double span_seconds = (stats.latest_hit_time_ticks - stats.earliest_hit_time_ticks) * TOA_UNIT_SECONDS;
+        std::cout << "Data span (hits): " << std::fixed << std::setprecision(3)
+                  << span_seconds << " s" << std::endl;
+    } else {
+        std::cout << "Data span (hits): <insufficient span>" << std::endl;
+    }
+    if (stats.tdc1_time_initialized && stats.latest_tdc1_time_ticks > stats.earliest_tdc1_time_ticks) {
+        double span_seconds = (stats.latest_tdc1_time_ticks - stats.earliest_tdc1_time_ticks) * TOA_UNIT_SECONDS;
+        std::cout << "Data span (tdc1): " << std::fixed << std::setprecision(3)
+                  << span_seconds << " s" << std::endl;
+    } else if (stats.total_tdc1_events > 0) {
+        std::cout << "Data span (tdc1): <insufficient span>" << std::endl;
+    }
+    if (stats.started_mid_stream) {
+        std::cout << "⚠ Detected data before first chunk header (attached mid-stream)." << std::endl;
+    }
+    
     std::cout << "Out-of-order packets (reordered): " << stats.total_reordered_packets << std::endl;
     std::cout << "Max reorder distance: " << stats.reorder_max_distance << std::endl;
     std::cout << "Reorder buffer overflows: " << stats.reorder_buffer_overflows << std::endl;
@@ -324,9 +350,13 @@ void print_statistics(const HitProcessor& processor) {
             uint8_t chip = pair.first;
             uint64_t total_count = stats.chip_tdc1_counts.count(chip) 
                 ? stats.chip_tdc1_counts.at(chip) : 0;
+            double cumulative = stats.chip_tdc1_cumulative_rates_hz.count(chip)
+                ? stats.chip_tdc1_cumulative_rates_hz.at(chip) : 0.0;
             std::cout << "  Chip " << static_cast<int>(chip) 
                       << ": " << std::fixed << std::setprecision(2) 
-                      << pair.second << " Hz (total: " << total_count << ")" << std::endl;
+                      << pair.second << " Hz instant, "
+                      << std::setprecision(2) << cumulative << " Hz cumulative"
+                      << " (total: " << total_count << ")" << std::endl;
         }
         // Note: Per-chip rates sum may not equal detector-wide rate if different chips
         // have different activity periods. Detector-wide cumulative rate matches SERVAL.
@@ -560,6 +590,7 @@ int main(int argc, char* argv[]) {
                 print_counter += words_processed_this_chunk;
                 if (print_counter >= stats_interval) {
                     std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                    processor.finalizeRates();
                     print_statistics(processor);
                     std::cout << std::endl;
                     print_counter = 0;
@@ -646,6 +677,7 @@ int main(int argc, char* argv[]) {
                 print_counter += (size / 8);
                 if (print_counter >= stats_interval) {
                     std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                    processor.finalizeRates();
                     print_statistics(processor);
                     std::cout << std::endl;
                     print_counter = 0;
@@ -707,6 +739,7 @@ int main(int argc, char* argv[]) {
     
     if (!stats_disable) {
         std::cout << "=== Final Statistics ===" << std::endl;
+        processor.finalizeRates();
         print_statistics(processor);
         print_recent_hits(processor, 10);
     }

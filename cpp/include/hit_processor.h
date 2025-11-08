@@ -36,6 +36,7 @@ struct Statistics {
     std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
     std::map<uint8_t, uint64_t> chip_tdc1_counts;  // Per-chip TDC1 event counts
     std::map<uint8_t, double> chip_tdc1_rates_hz;  // Per-chip TDC1 rates
+    std::map<uint8_t, double> chip_tdc1_cumulative_rates_hz; // Per-chip cumulative TDC1 rates
     std::map<std::string, uint64_t> packet_byte_totals; // Bytes accounted per packet category
     uint64_t total_bytes_accounted;  // Total bytes accounted across all categories
     uint64_t earliest_hit_time_ticks;
@@ -48,6 +49,7 @@ struct Statistics {
     uint64_t reorder_max_distance;     // Maximum reorder distance observed
     uint64_t reorder_buffer_overflows; // Number of times reorder buffer overflowed
     uint64_t reorder_packets_dropped_too_old; // Packets dropped because they were too old
+    bool started_mid_stream;           // True if first data lacked chunk header
 };
 
 class HitProcessor {
@@ -72,6 +74,9 @@ public:
     std::vector<PixelHit> getRecentHits() const;
     std::vector<PixelHit> getHits() const { return getRecentHits(); } // Legacy compatibility
     const Statistics& getStatistics() const { return stats_; }
+    void markMidStreamStart();
+    bool startedMidStream() const { return stats_.started_mid_stream; }
+    void finalizeRates();
     
     void clearHits();
     void resetStatistics();
@@ -91,6 +96,8 @@ private:
     std::map<uint8_t, uint64_t> chip_hit_totals_;
     std::map<uint8_t, uint64_t> chip_hits_at_last_update_;
     std::map<uint8_t, uint64_t> chip_tdc1_at_last_update_;
+    std::map<uint8_t, uint64_t> chip_tdc1_min_ticks_;
+    std::map<uint8_t, uint64_t> chip_tdc1_max_ticks_;
     uint64_t calls_since_last_update_;
     uint64_t last_hit_time_ticks_;
     uint64_t last_tdc1_time_ticks_;

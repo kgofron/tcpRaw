@@ -38,6 +38,7 @@ void HitProcessor::resetStatistics() {
     stats_.chip_hit_rates_hz.clear();
     stats_.chip_tdc1_counts.clear();
     stats_.chip_tdc1_rates_hz.clear();
+    stats_.chip_tdc1_cumulative_rates_hz.clear();
     stats_.packet_byte_totals.clear();
     stats_.total_bytes_accounted = 0;
     stats_.earliest_hit_time_ticks = std::numeric_limits<uint64_t>::max();
@@ -50,6 +51,7 @@ void HitProcessor::resetStatistics() {
     stats_.reorder_max_distance = 0;
     stats_.reorder_buffer_overflows = 0;
     stats_.reorder_packets_dropped_too_old = 0;
+    stats_.started_mid_stream = false;
     start_time_ns_ = 0;
     tdc1_start_time_ns_ = 0;
     last_update_time_ns_ = 0;
@@ -59,6 +61,8 @@ void HitProcessor::resetStatistics() {
     chip_hit_totals_.clear();
     chip_hits_at_last_update_.clear();
     chip_tdc1_at_last_update_.clear();
+    chip_tdc1_min_ticks_.clear();
+    chip_tdc1_max_ticks_.clear();
     calls_since_last_update_ = 0;
     last_hit_time_ticks_ = 0;
     last_tdc1_time_ticks_ = 0;
@@ -93,6 +97,10 @@ std::vector<PixelHit> HitProcessor::getRecentHits() const {
 void HitProcessor::clearHits() {
     recent_hits_head_ = 0;
     recent_hits_size_ = 0;
+}
+
+void HitProcessor::markMidStreamStart() {
+    stats_.started_mid_stream = true;
 }
 
 void HitProcessor::addHit(const PixelHit& hit) {
@@ -157,6 +165,19 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
         }
         stats_.total_tdc1_events++;
         stats_.chip_tdc1_counts[chip_index]++;
+        auto min_it = chip_tdc1_min_ticks_.find(chip_index);
+        if (min_it == chip_tdc1_min_ticks_.end()) {
+            chip_tdc1_min_ticks_[chip_index] = tdc.timestamp_ns;
+            chip_tdc1_max_ticks_[chip_index] = tdc.timestamp_ns;
+        } else {
+            if (tdc.timestamp_ns < min_it->second) {
+                min_it->second = tdc.timestamp_ns;
+            }
+            auto& max_entry = chip_tdc1_max_ticks_[chip_index];
+            if (tdc.timestamp_ns > max_entry) {
+                max_entry = tdc.timestamp_ns;
+            }
+        }
     }
     if (tdc.type == TDC2_RISE || tdc.type == TDC2_FALL) {
         stats_.total_tdc2_events++;
@@ -311,6 +332,32 @@ void HitProcessor::updateHitRate() {
         last_hit_time_ticks_ = stats_.latest_hit_time_ticks;
         last_tdc1_time_ticks_ = stats_.latest_tdc1_time_ticks;
     }
+
+    // Always refresh per-chip cumulative TDC1 rates
+    stats_.chip_tdc1_cumulative_rates_hz.clear();
+    for (const auto& pair : stats_.chip_tdc1_counts) {
+        uint8_t chip = pair.first;
+        uint64_t count = pair.second;
+        double chip_span_seconds = 0.0;
+        auto min_it = chip_tdc1_min_ticks_.find(chip);
+        auto max_it = chip_tdc1_max_ticks_.find(chip);
+        if (min_it != chip_tdc1_min_ticks_.end() && max_it != chip_tdc1_max_ticks_.end() &&
+            max_it->second > min_it->second) {
+            chip_span_seconds = (max_it->second - min_it->second) * TOA_UNIT_SECONDS;
+        }
+        if (chip_span_seconds > 0.0) {
+            stats_.chip_tdc1_cumulative_rates_hz[chip] = count / chip_span_seconds;
+        } else if (start_time_ns_ > 0) {
+            uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
+            if (total_elapsed_ns > 0) {
+                stats_.chip_tdc1_cumulative_rates_hz[chip] = count / (total_elapsed_ns / 1e9);
+            } else {
+                stats_.chip_tdc1_cumulative_rates_hz[chip] = 0.0;
+            }
+        } else {
+            stats_.chip_tdc1_cumulative_rates_hz[chip] = 0.0;
+        }
+    }
 }
 
 void HitProcessor::incrementDecodeError() {
@@ -327,5 +374,37 @@ void HitProcessor::incrementUnknownPacket() {
 
 void HitProcessor::incrementPacketType(uint8_t packet_type) {
     stats_.packet_type_counts[packet_type]++;
+}
+
+void HitProcessor::finalizeRates() {
+    updateHitRate();
+
+    constexpr double TOA_UNIT_SECONDS = 1.5625e-9;
+
+    double data_span_hits = 0.0;
+    if (stats_.hit_time_initialized && stats_.latest_hit_time_ticks > stats_.earliest_hit_time_ticks) {
+        data_span_hits = (stats_.latest_hit_time_ticks - stats_.earliest_hit_time_ticks) * TOA_UNIT_SECONDS;
+    }
+    double data_span_tdc1 = 0.0;
+    if (stats_.tdc1_time_initialized && stats_.latest_tdc1_time_ticks > stats_.earliest_tdc1_time_ticks) {
+        data_span_tdc1 = (stats_.latest_tdc1_time_ticks - stats_.earliest_tdc1_time_ticks) * TOA_UNIT_SECONDS;
+    }
+
+    if (stats_.hit_rate_hz == 0.0 && data_span_hits > 0.0) {
+        stats_.hit_rate_hz = stats_.total_hits / data_span_hits;
+    }
+    if (stats_.tdc1_rate_hz == 0.0 && data_span_tdc1 > 0.0) {
+        stats_.tdc1_rate_hz = stats_.total_tdc1_events / data_span_tdc1;
+    }
+    if (stats_.chip_hit_rates_hz.empty() && data_span_hits > 0.0) {
+        for (const auto& pair : chip_hit_totals_) {
+            stats_.chip_hit_rates_hz[pair.first] = pair.second / data_span_hits;
+        }
+    }
+    if (stats_.chip_tdc1_rates_hz.empty() && data_span_tdc1 > 0.0) {
+        for (const auto& pair : stats_.chip_tdc1_counts) {
+            stats_.chip_tdc1_rates_hz[pair.first] = pair.second / data_span_tdc1;
+        }
+    }
 }
 
