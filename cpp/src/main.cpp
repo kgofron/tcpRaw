@@ -3,7 +3,7 @@
  *         Oak Ridge National Laboratory
  *
  * Created:  November 2, 2025
- * Modified: November 4, 2025
+ * Modified: November 8, 2025
  */
 
 #include "tcp_server.h"
@@ -356,11 +356,18 @@ void print_statistics(const HitProcessor& processor) {
 }
 
 void print_recent_hits(const HitProcessor& processor, size_t count) {
-    const auto& hits = processor.getHits();
-    size_t start = (hits.size() > count) ? (hits.size() - count) : 0;
+    auto hits = processor.getHits();
+    size_t total = hits.size();
+    size_t start = (total > count) ? (total - count) : 0;
+    size_t to_show = total - start;
     
-    std::cout << "\n=== Recent Hits (last " << (hits.size() - start) << ") ===" << std::endl;
-    for (size_t i = start; i < hits.size(); ++i) {
+    std::cout << "\n=== Recent Hits (last " << to_show << ") ===" << std::endl;
+    if (to_show == 0) {
+        std::cout << "(recent hit history disabled)" << std::endl;
+        return;
+    }
+    
+    for (size_t i = start; i < total; ++i) {
         const PixelHit& hit = hits[i];
         std::cout << "Chip " << static_cast<int>(hit.chip_index) 
                   << ", X=" << hit.x << ", Y=" << hit.y
@@ -379,6 +386,7 @@ int main(int argc, char* argv[]) {
     int stats_time_interval = 10;  // Print status every N seconds (0 = disable)
     bool stats_final_only = false; // Only print final statistics
     bool stats_disable = false;    // Completely disable statistics printing
+    size_t recent_hit_count = 10;  // Number of recent hits to retain (0 = disable)
     bool exit_on_disconnect = false; // Exit after connection closes (don't auto-reconnect)
     std::string input_file;
     bool file_mode = false;
@@ -406,6 +414,8 @@ int main(int argc, char* argv[]) {
             stats_disable = true;
             stats_interval = 0;
             stats_time_interval = 0;
+        } else if (arg == "--recent-hit-count" && i + 1 < argc) {
+            recent_hit_count = std::stoul(argv[++i]);
         } else if (arg == "--exit-on-disconnect") {
             exit_on_disconnect = true;
         } else if (arg == "--input-file" && i + 1 < argc) {
@@ -425,6 +435,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --stats-time N        Print status every N seconds (default: 10, 0=disable)" << std::endl;
             std::cout << "  --stats-final-only    Only print final statistics (no periodic)" << std::endl;
             std::cout << "  --stats-disable       Disable all statistics printing" << std::endl;
+            std::cout << "  --recent-hit-count N  Retain N recent hits for summary (default: 10, 0=disable)" << std::endl;
             std::cout << "  --exit-on-disconnect  Exit after connection closes (don't auto-reconnect)" << std::endl;
             std::cout << "  --help                Show this help message" << std::endl;
             return 0;
@@ -458,8 +469,14 @@ int main(int argc, char* argv[]) {
         }
         std::cout << std::endl;
     }
+    if (recent_hit_count == 0) {
+        std::cout << "Recent hit history: disabled" << std::endl;
+    } else {
+        std::cout << "Recent hit history: retaining last " << recent_hit_count << " hits" << std::endl;
+    }
     
     HitProcessor processor;
+    processor.setRecentHitCapacity(recent_hit_count);
     StreamState stream_state;
     
     std::unique_ptr<PacketReorderBuffer> reorder_buffer;

@@ -3,7 +3,7 @@
  *         Oak Ridge National Laboratory
  *
  * Created:  November 2, 2025
- * Modified: November 4, 2025
+ * Modified: November 8, 2025
  */
 
 #ifndef HIT_PROCESSOR_H
@@ -68,14 +68,19 @@ public:
                             uint64_t packets_dropped_too_old);
     void addPacketBytes(const std::string& category, uint64_t bytes);
     
-    const std::vector<PixelHit>& getHits() const { return hits_; }
+    void setRecentHitCapacity(size_t capacity);
+    std::vector<PixelHit> getRecentHits() const;
+    std::vector<PixelHit> getHits() const { return getRecentHits(); } // Legacy compatibility
     const Statistics& getStatistics() const { return stats_; }
     
     void clearHits();
     void resetStatistics();
     
 private:
-    std::vector<PixelHit> hits_;
+    size_t recent_hit_capacity_;
+    std::vector<PixelHit> recent_hits_buffer_;
+    size_t recent_hits_head_;
+    size_t recent_hits_size_;
     Statistics stats_;
     uint64_t start_time_ns_;  // Time when statistics started (for cumulative rates)
     uint64_t tdc1_start_time_ns_;  // Time when first TDC1 event arrived (for TDC1 cumulative rate)
@@ -83,6 +88,7 @@ private:
     uint64_t hits_at_last_update_;
     uint64_t tdc1_events_at_last_update_;
     uint64_t tdc2_events_at_last_update_;
+    std::map<uint8_t, uint64_t> chip_hit_totals_;
     std::map<uint8_t, uint64_t> chip_hits_at_last_update_;
     std::map<uint8_t, uint64_t> chip_tdc1_at_last_update_;
     uint64_t calls_since_last_update_;

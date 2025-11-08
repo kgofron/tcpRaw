@@ -3,14 +3,18 @@
  *         Oak Ridge National Laboratory
  *
  * Created:  November 2, 2025
- * Modified: November 4, 2025
+ * Modified: November 8, 2025
  */
 
 #include "hit_processor.h"
 #include <chrono>
 #include <limits>
 
-HitProcessor::HitProcessor() {
+HitProcessor::HitProcessor()
+    : recent_hit_capacity_(10),
+      recent_hits_buffer_(recent_hit_capacity_),
+      recent_hits_head_(0),
+      recent_hits_size_(0) {
     resetStatistics();
 }
 
@@ -46,24 +50,66 @@ void HitProcessor::resetStatistics() {
     stats_.reorder_max_distance = 0;
     stats_.reorder_buffer_overflows = 0;
     stats_.reorder_packets_dropped_too_old = 0;
-    start_time_ns_ = 0;  // Will be initialized on first hit to exclude idle time
-    tdc1_start_time_ns_ = 0;  // Will be initialized on first TDC1 event
+    start_time_ns_ = 0;
+    tdc1_start_time_ns_ = 0;
     last_update_time_ns_ = 0;
     hits_at_last_update_ = 0;
     tdc1_events_at_last_update_ = 0;
     tdc2_events_at_last_update_ = 0;
+    chip_hit_totals_.clear();
     chip_hits_at_last_update_.clear();
     chip_tdc1_at_last_update_.clear();
     calls_since_last_update_ = 0;
     last_hit_time_ticks_ = 0;
     last_tdc1_time_ticks_ = 0;
+    recent_hits_head_ = 0;
+    recent_hits_size_ = 0;
+}
+
+void HitProcessor::setRecentHitCapacity(size_t capacity) {
+    recent_hit_capacity_ = capacity;
+    recent_hits_buffer_.assign(recent_hit_capacity_, PixelHit{});
+    recent_hits_head_ = 0;
+    recent_hits_size_ = 0;
+}
+
+std::vector<PixelHit> HitProcessor::getRecentHits() const {
+    std::vector<PixelHit> result;
+    if (recent_hit_capacity_ == 0 || recent_hits_size_ == 0 || recent_hits_buffer_.empty()) {
+        return result;
+    }
+
+    result.reserve(recent_hits_size_);
+    size_t capacity = recent_hits_buffer_.size();
+    size_t start_index = (recent_hits_head_ + capacity - recent_hits_size_) % capacity;
+
+    for (size_t i = 0; i < recent_hits_size_; ++i) {
+        size_t index = (start_index + i) % capacity;
+        result.push_back(recent_hits_buffer_[index]);
+    }
+    return result;
+}
+
+void HitProcessor::clearHits() {
+    recent_hits_head_ = 0;
+    recent_hits_size_ = 0;
 }
 
 void HitProcessor::addHit(const PixelHit& hit) {
-    hits_.push_back(hit);
+    if (recent_hit_capacity_ > 0) {
+        if (recent_hits_buffer_.size() != recent_hit_capacity_) {
+            recent_hits_buffer_.assign(recent_hit_capacity_, PixelHit{});
+        }
+        recent_hits_buffer_[recent_hits_head_] = hit;
+        recent_hits_head_ = (recent_hits_head_ + 1) % recent_hit_capacity_;
+        if (recent_hits_size_ < recent_hit_capacity_) {
+            recent_hits_size_++;
+        }
+    }
+
     stats_.total_hits++;
-    
-    // Initialize start_time_ns_ on first hit (exclude idle time before data starts)
+    chip_hit_totals_[hit.chip_index]++;
+
     if (start_time_ns_ == 0) {
         auto now = std::chrono::steady_clock::now();
         start_time_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -73,8 +119,7 @@ void HitProcessor::addHit(const PixelHit& hit) {
         tdc1_events_at_last_update_ = 0;
         tdc2_events_at_last_update_ = 0;
     }
-    
-    // Only update hit rate every 1000 hits to reduce overhead
+
     calls_since_last_update_++;
     if (calls_since_last_update_ >= 1000) {
         updateHitRate();
@@ -91,9 +136,7 @@ void HitProcessor::addHit(const PixelHit& hit) {
 
 void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
     stats_.total_tdc_events++;
-    
-    // Initialize start_time_ns_ on first event (hit or TDC) to exclude idle time
-    // This ensures cumulative rates are calculated from first data, not just first hit
+
     if (start_time_ns_ == 0) {
         auto now = std::chrono::steady_clock::now();
         start_time_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -103,8 +146,7 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
         tdc1_events_at_last_update_ = 0;
         tdc2_events_at_last_update_ = 0;
     }
-    
-    // Track TDC1 events separately (RISE and FALL)
+
     if (tdc.type == TDC1_RISE || tdc.type == TDC1_FALL) {
         if (!stats_.tdc1_time_initialized || tdc.timestamp_ns < stats_.earliest_tdc1_time_ticks) {
             stats_.earliest_tdc1_time_ticks = tdc.timestamp_ns;
@@ -114,15 +156,12 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
             stats_.latest_tdc1_time_ticks = tdc.timestamp_ns;
         }
         stats_.total_tdc1_events++;
-        stats_.chip_tdc1_counts[chip_index]++;  // Track per-chip TDC1 counts
+        stats_.chip_tdc1_counts[chip_index]++;
     }
-    // Track TDC2 events separately (RISE and FALL)
     if (tdc.type == TDC2_RISE || tdc.type == TDC2_FALL) {
         stats_.total_tdc2_events++;
     }
-    
-    // Update cumulative rates immediately for TDC events
-    // (Rate updates are throttled for hits, but TDC events are infrequent)
+
     updateHitRate();
 }
 
@@ -146,22 +185,16 @@ void HitProcessor::incrementChunkCount() {
 }
 
 void HitProcessor::processChunkMetadata(const ChunkMetadata&) {
-    // For now, just track that we received metadata
-    // Future: Could use this for time alignment
-}
-
-void HitProcessor::clearHits() {
-    hits_.clear();
+    // Reserved for future metadata-driven features
 }
 
 void HitProcessor::updateHitRate() {
     auto now = std::chrono::steady_clock::now();
     uint64_t current_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
-    
+
     constexpr double TOA_UNIT_SECONDS = 1.5625e-9;
-    
-    // Always update cumulative rates based on data time when available; fall back to wall time
+
     double data_elapsed_seconds_hits = 0.0;
     if (stats_.hit_time_initialized && stats_.latest_hit_time_ticks > stats_.earliest_hit_time_ticks) {
         data_elapsed_seconds_hits = (stats_.latest_hit_time_ticks - stats_.earliest_hit_time_ticks) * TOA_UNIT_SECONDS;
@@ -170,7 +203,7 @@ void HitProcessor::updateHitRate() {
     if (stats_.tdc1_time_initialized && stats_.latest_tdc1_time_ticks > stats_.earliest_tdc1_time_ticks) {
         data_elapsed_seconds_tdc1 = (stats_.latest_tdc1_time_ticks - stats_.earliest_tdc1_time_ticks) * TOA_UNIT_SECONDS;
     }
-    
+
     if (data_elapsed_seconds_hits > 0.0) {
         stats_.cumulative_hit_rate_hz = stats_.total_hits / data_elapsed_seconds_hits;
     } else if (start_time_ns_ > 0) {
@@ -193,26 +226,23 @@ void HitProcessor::updateHitRate() {
             stats_.cumulative_tdc2_rate_hz = stats_.total_tdc2_events / (total_elapsed_ns / 1e9);
         }
     }
-    
+
     if (last_update_time_ns_ == 0 || last_update_time_ns_ == start_time_ns_) {
         last_update_time_ns_ = current_time_ns;
-        hits_at_last_update_ = stats_.total_hits;  // Use stats_.total_hits instead of hits_.size()
+        hits_at_last_update_ = stats_.total_hits;
         tdc1_events_at_last_update_ = stats_.total_tdc1_events;
         tdc2_events_at_last_update_ = stats_.total_tdc2_events;
+        chip_hits_at_last_update_ = chip_hit_totals_;
+        chip_tdc1_at_last_update_ = stats_.chip_tdc1_counts;
         last_hit_time_ticks_ = stats_.latest_hit_time_ticks;
         last_tdc1_time_ticks_ = stats_.latest_tdc1_time_ticks;
-        // Initialize per-chip counters for all chips we've seen
-        for (const auto& hit : hits_) {
-            chip_hits_at_last_update_[hit.chip_index] = 0;
-        }
         return;
     }
-    
+
     uint64_t elapsed_ns = current_time_ns - last_update_time_ns_;
-    if (elapsed_ns > 1'000'000'000) { // Update every second
+    if (elapsed_ns > 1'000'000'000) {
         double elapsed_seconds = elapsed_ns / 1e9;
-        
-        // Update instant rates (rolling average over ~1s window)
+
         uint64_t new_hits = stats_.total_hits - hits_at_last_update_;
         double data_span_hits = 0.0;
         if (stats_.latest_hit_time_ticks > last_hit_time_ticks_) {
@@ -223,8 +253,7 @@ void HitProcessor::updateHitRate() {
         } else {
             stats_.hit_rate_hz = new_hits / elapsed_seconds;
         }
-        
-        // Update TDC1 rate
+
         uint64_t new_tdc1_events = stats_.total_tdc1_events - tdc1_events_at_last_update_;
         double data_span_tdc1 = 0.0;
         if (stats_.latest_tdc1_time_ticks > last_tdc1_time_ticks_) {
@@ -235,23 +264,19 @@ void HitProcessor::updateHitRate() {
         } else {
             stats_.tdc1_rate_hz = new_tdc1_events / elapsed_seconds;
         }
-        
-        // Update TDC2 rate
+
         uint64_t new_tdc2_events = stats_.total_tdc2_events - tdc2_events_at_last_update_;
         stats_.tdc2_rate_hz = new_tdc2_events / elapsed_seconds;
-        
-        // Update per-chip hit rates
+
         stats_.chip_hit_rates_hz.clear();
-        std::map<uint8_t, uint64_t> current_chip_hits;
-        for (const auto& hit : hits_) {
-            current_chip_hits[hit.chip_index]++;
-        }
-        
-        for (const auto& pair : current_chip_hits) {
+        for (const auto& pair : chip_hit_totals_) {
             uint8_t chip = pair.first;
             uint64_t current_count = pair.second;
-            uint64_t last_count = chip_hits_at_last_update_.count(chip) 
-                ? chip_hits_at_last_update_[chip] : 0;
+            uint64_t last_count = 0;
+            auto last_it = chip_hits_at_last_update_.find(chip);
+            if (last_it != chip_hits_at_last_update_.end()) {
+                last_count = last_it->second;
+            }
             uint64_t new_chip_hits = current_count - last_count;
             if (data_span_hits > 0.0) {
                 stats_.chip_hit_rates_hz[chip] = new_chip_hits / data_span_hits;
@@ -259,14 +284,16 @@ void HitProcessor::updateHitRate() {
                 stats_.chip_hit_rates_hz[chip] = new_chip_hits / elapsed_seconds;
             }
         }
-        
-        // Update per-chip TDC1 rates
+
         stats_.chip_tdc1_rates_hz.clear();
         for (const auto& pair : stats_.chip_tdc1_counts) {
             uint8_t chip = pair.first;
             uint64_t current_count = pair.second;
-            uint64_t last_count = chip_tdc1_at_last_update_.count(chip) 
-                ? chip_tdc1_at_last_update_[chip] : 0;
+            uint64_t last_count = 0;
+            auto last_it = chip_tdc1_at_last_update_.find(chip);
+            if (last_it != chip_tdc1_at_last_update_.end()) {
+                last_count = last_it->second;
+            }
             uint64_t new_tdc1_events_chip = current_count - last_count;
             if (data_span_tdc1 > 0.0) {
                 stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events_chip / data_span_tdc1;
@@ -274,17 +301,15 @@ void HitProcessor::updateHitRate() {
                 stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events_chip / elapsed_seconds;
             }
         }
-        
-        // Update last state
+
         last_update_time_ns_ = current_time_ns;
-        hits_at_last_update_ = stats_.total_hits;  // Use stats_.total_hits instead of hits_.size()
+        hits_at_last_update_ = stats_.total_hits;
         tdc1_events_at_last_update_ = stats_.total_tdc1_events;
         tdc2_events_at_last_update_ = stats_.total_tdc2_events;
-        chip_hits_at_last_update_ = current_chip_hits;
+        chip_hits_at_last_update_ = chip_hit_totals_;
         chip_tdc1_at_last_update_ = stats_.chip_tdc1_counts;
         last_hit_time_ticks_ = stats_.latest_hit_time_ticks;
         last_tdc1_time_ticks_ = stats_.latest_tdc1_time_ticks;
-        return;
     }
 }
 

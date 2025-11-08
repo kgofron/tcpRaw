@@ -295,8 +295,8 @@ int main(int argc, char* argv[]) {
     server.run([&](const uint8_t* data, size_t size) {
         process_raw_data(data, size, processor, chunk_meta);
         
-        // Process hits through clustering
-        for (const auto& hit : processor.getHits()) {
+        // Process hits through clustering (use full history buffer if enabled)
+        for (const auto& hit : processor.getRecentHits()) {
             clusterer->addHit(hit);
         }
         
