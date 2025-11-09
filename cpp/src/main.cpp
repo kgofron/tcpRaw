@@ -557,6 +557,8 @@ int main(int argc, char* argv[]) {
     bool stats_disable = false;    // Completely disable statistics printing
     size_t recent_hit_count = 10;  // Number of recent hits to retain (0 = disable)
     bool exit_on_disconnect = false; // Exit after connection closes (don't auto-reconnect)
+    size_t decoder_workers = 0;    // 0 = auto (stream=4, file=1)
+    bool decoder_workers_overridden = false;
     std::string input_file;
     bool file_mode = false;
     std::filesystem::path file_path;
@@ -585,6 +587,9 @@ int main(int argc, char* argv[]) {
             stats_time_interval = 0;
         } else if (arg == "--recent-hit-count" && i + 1 < argc) {
             recent_hit_count = std::stoul(argv[++i]);
+        } else if (arg == "--decoder-workers" && i + 1 < argc) {
+            decoder_workers = std::stoul(argv[++i]);
+            decoder_workers_overridden = true;
         } else if (arg == "--exit-on-disconnect") {
             exit_on_disconnect = true;
         } else if (arg == "--input-file" && i + 1 < argc) {
@@ -605,6 +610,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --stats-final-only    Only print final statistics (no periodic)" << std::endl;
             std::cout << "  --stats-disable       Disable all statistics printing" << std::endl;
             std::cout << "  --recent-hit-count N  Retain N recent hits for summary (default: 10, 0=disable)" << std::endl;
+            std::cout << "  --decoder-workers N   Number of parallel decoder workers (default: auto)" << std::endl;
             std::cout << "  --exit-on-disconnect  Exit after connection closes (don't auto-reconnect)" << std::endl;
             std::cout << "  --help                Show this help message" << std::endl;
             return 0;
@@ -647,8 +653,21 @@ int main(int argc, char* argv[]) {
     HitProcessor processor;
     processor.setRecentHitCapacity(recent_hit_count);
     StreamState stream_state;
-    const size_t worker_count = 4;
-    DecodeDispatcher dispatcher(worker_count, processor);
+    size_t worker_count = decoder_workers;
+    if (!decoder_workers_overridden) {
+        if (file_mode) {
+            worker_count = 1;
+        } else {
+            worker_count = std::max<size_t>(4, std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4);
+        }
+    } else if (worker_count == 0) {
+        worker_count = file_mode ? 1 : std::max<size_t>(4, std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4);
+    }
+    
+    std::unique_ptr<DecodeDispatcher> dispatcher;
+    if (worker_count > 1) {
+        dispatcher = std::make_unique<DecodeDispatcher>(worker_count, processor);
+    }
     
     std::unique_ptr<PacketReorderBuffer> reorder_buffer;
     if (enable_reorder) {
@@ -704,8 +723,8 @@ int main(int argc, char* argv[]) {
                 data_ptr += to_copy;
                 remaining -= to_copy;
                 if (leftover.size() == 8) {
-                    process_raw_data(leftover.data(), 8, processor, stream_state,
-                        &dispatcher,
+            process_raw_data(leftover.data(), 8, processor, stream_state,
+                        dispatcher ? dispatcher.get() : nullptr,
                         reorder_buffer ? reorder_buffer.get() : nullptr);
                     total_packets_received += 1;
                     words_processed_this_chunk += 1;
@@ -716,7 +735,7 @@ int main(int argc, char* argv[]) {
             size_t aligned = (remaining / 8) * 8;
             if (aligned > 0) {
                 process_raw_data(data_ptr, aligned, processor, stream_state,
-                        &dispatcher,
+                        dispatcher ? dispatcher.get() : nullptr,
                         reorder_buffer ? reorder_buffer.get() : nullptr);
                 size_t words = aligned / 8;
                 total_packets_received += words;
@@ -733,7 +752,9 @@ int main(int argc, char* argv[]) {
                 print_counter += words_processed_this_chunk;
                 if (print_counter >= stats_interval) {
                     std::cout << "\n[Periodic Statistics Update]" << std::endl;
-                    dispatcher.waitUntilIdle();
+                    if (dispatcher) {
+                        dispatcher->waitUntilIdle();
+                    }
                     processor.finalizeRates();
                     print_statistics(processor);
                     std::cout << std::endl;
@@ -770,7 +791,9 @@ int main(int argc, char* argv[]) {
                       << " trailing byte(s) not forming a full 8-byte word" << std::endl;
         }
         
-        dispatcher.waitUntilIdle();
+        if (dispatcher) {
+            dispatcher->waitUntilIdle();
+        }
     } else {
         TCPServer server(host, port);
         
@@ -817,14 +840,16 @@ int main(int argc, char* argv[]) {
             total_packets_received += (size / 8);
             
             process_raw_data(data, size, processor, stream_state,
-                            &dispatcher,
+                            dispatcher ? dispatcher.get() : nullptr,
                             reorder_buffer ? reorder_buffer.get() : nullptr);
             
             if (!stats_disable && stats_interval > 0 && !stats_final_only) {
                 print_counter += (size / 8);
                 if (print_counter >= stats_interval) {
                     std::cout << "\n[Periodic Statistics Update]" << std::endl;
-                    dispatcher.waitUntilIdle();
+                    if (dispatcher) {
+                        dispatcher->waitUntilIdle();
+                    }
                     processor.finalizeRates();
                     print_statistics(processor);
                     std::cout << std::endl;
@@ -863,7 +888,9 @@ int main(int argc, char* argv[]) {
         bytes_dropped_incomplete = conn_stats.bytes_dropped_incomplete;
         total_bytes_received = conn_stats.bytes_received;
         
-        dispatcher.waitUntilIdle();
+        if (dispatcher) {
+            dispatcher->waitUntilIdle();
+        }
     }
     
     if (!first_data_received) {
@@ -889,7 +916,9 @@ int main(int argc, char* argv[]) {
     
     if (!stats_disable) {
         std::cout << "=== Final Statistics ===" << std::endl;
-        dispatcher.waitUntilIdle();
+        if (dispatcher) {
+            dispatcher->waitUntilIdle();
+        }
         processor.finalizeRates();
         print_statistics(processor);
         print_recent_hits(processor, 10);

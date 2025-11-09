@@ -126,6 +126,7 @@ The parser will:
 - `--stats-final-only` - Only print final statistics (no periodic)
 - `--stats-disable` - Disable all statistics printing
 - `--recent-hit-count N` - Retain the last N hits for the summary (default: 10, 0=disable)
+- `--decoder-workers N` - Override the number of parallel decoder workers (default: auto; file mode=1, stream mode≈cpu count)
 
 **Control options:**
 - `--exit-on-disconnect` - Exit after connection closes (don't auto-reconnect)
