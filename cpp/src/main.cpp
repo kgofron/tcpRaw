@@ -28,6 +28,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <system_error>
+#include <thread>
+#include <condition_variable>
+#include <queue>
 
 static std::string format_type_label(const std::string& prefix, uint8_t type) {
     std::ostringstream oss;
@@ -35,6 +38,8 @@ static std::string format_type_label(const std::string& prefix, uint8_t type) {
         << std::setw(2) << static_cast<int>(type) << ")";
     return oss.str();
 }
+
+void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, const ChunkMetadata& chunk_meta);
 
 struct StreamState {
     bool in_chunk = false;
@@ -51,8 +56,117 @@ struct StreamState {
     }
 };
 
+struct DecodeTask {
+    uint64_t word = 0;
+    uint8_t chip_index = 0;
+    ChunkMetadata chunk_meta{};
+};
+
+class DecodeDispatcher {
+public:
+    DecodeDispatcher(size_t num_workers, HitProcessor& processor)
+        : processor_(processor),
+          stop_(false),
+          pending_tasks_(0) {
+        size_t workers = std::max<size_t>(1, num_workers);
+        worker_data_.reserve(workers);
+        for (size_t i = 0; i < workers; ++i) {
+            worker_data_.emplace_back(std::make_unique<WorkerData>());
+        }
+        workers_.reserve(workers);
+        for (size_t i = 0; i < workers; ++i) {
+            workers_.emplace_back([this, i]() { workerLoop(i); });
+        }
+    }
+    
+    ~DecodeDispatcher() {
+        stop();
+    }
+    
+    void submit(uint64_t word, uint8_t chip_index, const ChunkMetadata& meta) {
+        size_t index = chip_index % worker_data_.size();
+        pending_tasks_.fetch_add(1, std::memory_order_release);
+        auto& data = *worker_data_[index];
+        {
+            std::lock_guard<std::mutex> lock(data.mutex);
+            data.queue.push(DecodeTask{word, chip_index, meta});
+        }
+        data.cond.notify_one();
+    }
+    
+    void waitUntilIdle() {
+        std::unique_lock<std::mutex> lock(pending_mutex_);
+        idle_cv_.wait(lock, [this]() {
+            return pending_tasks_.load(std::memory_order_acquire) == 0;
+        });
+    }
+    
+    void stop() {
+        bool expected = false;
+        if (!stop_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            return;
+        }
+        for (auto& data : worker_data_) {
+            data->cond.notify_all();
+        }
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        workers_.clear();
+    }
+    
+private:
+    struct WorkerData {
+        std::mutex mutex;
+        std::condition_variable cond;
+        std::queue<DecodeTask> queue;
+    };
+    
+    HitProcessor& processor_;
+    std::vector<std::thread> workers_;
+    std::vector<std::unique_ptr<WorkerData>> worker_data_;
+    std::atomic<bool> stop_;
+    std::atomic<size_t> pending_tasks_;
+    std::mutex pending_mutex_;
+    std::condition_variable idle_cv_;
+    
+    void workerLoop(size_t index) {
+        while (true) {
+            DecodeTask task;
+            {
+                auto& data = *worker_data_[index];
+                std::unique_lock<std::mutex> lock(data.mutex);
+                data.cond.wait(lock, [this, &data]() {
+                    return stop_.load(std::memory_order_acquire) || !data.queue.empty();
+                });
+                
+                if (stop_.load(std::memory_order_acquire) && data.queue.empty()) {
+                    break;
+                }
+                
+                if (!data.queue.empty()) {
+                    task = data.queue.front();
+                    data.queue.pop();
+                } else {
+                    continue;
+                }
+            }
+            
+            process_packet(task.word, task.chip_index, processor_, task.chunk_meta);
+            
+            size_t remaining = pending_tasks_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+            if (remaining == 0) {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                idle_cv_.notify_all();
+            }
+        }
+    }
+};
+
 // Helper function to process a single packet (used by reorder buffer callback)
-void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, ChunkMetadata& chunk_meta) {
+void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, const ChunkMetadata& chunk_meta) {
     // Check full-byte types first (0x50, 0x71, etc. that can't be distinguished by 4-bit)
     uint8_t full_type = (word >> 56) & 0xFF;
     
@@ -167,7 +281,7 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
 
 // Process raw data buffer
 void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, StreamState& state,
-                      PacketReorderBuffer* reorder_buffer = nullptr) {
+                      DecodeDispatcher* dispatcher, PacketReorderBuffer* reorder_buffer = nullptr) {
     const uint64_t* data_words = reinterpret_cast<const uint64_t*>(buffer);
     size_t num_words = bytes / 8;
     
@@ -242,13 +356,21 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
             if (is_spidr_packet_id && reorder_buffer) {
                 // Use reorder buffer for SPIDR packet ID packets
                 reorder_buffer->processPacket(word, packet_count, state.current_chunk_id,
-                    [&processor, &state](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
+                    [&processor, &state, dispatcher](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
                         // Callback: process reordered packet
-                        process_packet(w, state.chip_index, processor, state.chunk_meta);
+                        if (dispatcher) {
+                            dispatcher->submit(w, state.chip_index, state.chunk_meta);
+                        } else {
+                            process_packet(w, state.chip_index, processor, state.chunk_meta);
+                        }
                     });
             } else {
                 // Process immediately (not SPIDR packet ID or reordering disabled)
-                process_packet(word, state.chip_index, processor, state.chunk_meta);
+                if (dispatcher) {
+                    dispatcher->submit(word, state.chip_index, state.chunk_meta);
+                } else {
+                    process_packet(word, state.chip_index, processor, state.chunk_meta);
+                }
             }
         }
         
@@ -335,26 +457,43 @@ void print_statistics(const HitProcessor& processor) {
         }
     }
     
-    if (!stats.chip_hit_rates_hz.empty()) {
+    bool any_chip_hit_rate = false;
+    for (size_t chip = 0; chip < stats.chip_hit_rate_valid.size(); ++chip) {
+        if (stats.chip_hit_rate_valid[chip]) {
+            any_chip_hit_rate = true;
+            break;
+        }
+    }
+    if (any_chip_hit_rate) {
         std::cout << "Per-chip hit rates:" << std::endl;
-        for (const auto& pair : stats.chip_hit_rates_hz) {
-            std::cout << "  Chip " << static_cast<int>(pair.first) 
-                      << ": " << std::fixed << std::setprecision(2) 
-                      << pair.second << " Hz" << std::endl;
+        for (size_t chip = 0; chip < stats.chip_hit_rates_hz.size(); ++chip) {
+            if (!stats.chip_hit_rate_valid[chip]) {
+                continue;
+            }
+            std::cout << "  Chip " << chip
+                      << ": " << std::fixed << std::setprecision(2)
+                      << stats.chip_hit_rates_hz[chip] << " Hz" << std::endl;
         }
     }
     
-    if (!stats.chip_tdc1_rates_hz.empty()) {
+    bool any_chip_tdc1 = false;
+    for (size_t chip = 0; chip < stats.chip_tdc1_present.size(); ++chip) {
+        if (stats.chip_tdc1_present[chip]) {
+            any_chip_tdc1 = true;
+            break;
+        }
+    }
+    if (any_chip_tdc1) {
         std::cout << "Per-chip TDC1 rates (averaged per chip, for diagnostics):" << std::endl;
-        for (const auto& pair : stats.chip_tdc1_rates_hz) {
-            uint8_t chip = pair.first;
-            uint64_t total_count = stats.chip_tdc1_counts.count(chip) 
-                ? stats.chip_tdc1_counts.at(chip) : 0;
-            double cumulative = stats.chip_tdc1_cumulative_rates_hz.count(chip)
-                ? stats.chip_tdc1_cumulative_rates_hz.at(chip) : 0.0;
-            std::cout << "  Chip " << static_cast<int>(chip) 
-                      << ": " << std::fixed << std::setprecision(2) 
-                      << pair.second << " Hz instant, "
+        for (size_t chip = 0; chip < stats.chip_tdc1_rates_hz.size(); ++chip) {
+            if (!stats.chip_tdc1_present[chip]) {
+                continue;
+            }
+            uint64_t total_count = stats.chip_tdc1_counts[chip];
+            double cumulative = stats.chip_tdc1_cumulative_rates_hz[chip];
+            std::cout << "  Chip " << chip
+                      << ": " << std::fixed << std::setprecision(2)
+                      << stats.chip_tdc1_rates_hz[chip] << " Hz instant, "
                       << std::setprecision(2) << cumulative << " Hz cumulative"
                       << " (total: " << total_count << ")" << std::endl;
         }
@@ -508,6 +647,8 @@ int main(int argc, char* argv[]) {
     HitProcessor processor;
     processor.setRecentHitCapacity(recent_hit_count);
     StreamState stream_state;
+    const size_t worker_count = 4;
+    DecodeDispatcher dispatcher(worker_count, processor);
     
     std::unique_ptr<PacketReorderBuffer> reorder_buffer;
     if (enable_reorder) {
@@ -564,6 +705,7 @@ int main(int argc, char* argv[]) {
                 remaining -= to_copy;
                 if (leftover.size() == 8) {
                     process_raw_data(leftover.data(), 8, processor, stream_state,
+                        &dispatcher,
                         reorder_buffer ? reorder_buffer.get() : nullptr);
                     total_packets_received += 1;
                     words_processed_this_chunk += 1;
@@ -574,6 +716,7 @@ int main(int argc, char* argv[]) {
             size_t aligned = (remaining / 8) * 8;
             if (aligned > 0) {
                 process_raw_data(data_ptr, aligned, processor, stream_state,
+                        &dispatcher,
                         reorder_buffer ? reorder_buffer.get() : nullptr);
                 size_t words = aligned / 8;
                 total_packets_received += words;
@@ -590,6 +733,7 @@ int main(int argc, char* argv[]) {
                 print_counter += words_processed_this_chunk;
                 if (print_counter >= stats_interval) {
                     std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                    dispatcher.waitUntilIdle();
                     processor.finalizeRates();
                     print_statistics(processor);
                     std::cout << std::endl;
@@ -625,6 +769,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "[WARNING] Ignoring " << leftover.size()
                       << " trailing byte(s) not forming a full 8-byte word" << std::endl;
         }
+        
+        dispatcher.waitUntilIdle();
     } else {
         TCPServer server(host, port);
         
@@ -671,12 +817,14 @@ int main(int argc, char* argv[]) {
             total_packets_received += (size / 8);
             
             process_raw_data(data, size, processor, stream_state,
+                            &dispatcher,
                             reorder_buffer ? reorder_buffer.get() : nullptr);
             
             if (!stats_disable && stats_interval > 0 && !stats_final_only) {
                 print_counter += (size / 8);
                 if (print_counter >= stats_interval) {
                     std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                    dispatcher.waitUntilIdle();
                     processor.finalizeRates();
                     print_statistics(processor);
                     std::cout << std::endl;
@@ -714,6 +862,8 @@ int main(int argc, char* argv[]) {
         conn_stats = server.getConnectionStats();
         bytes_dropped_incomplete = conn_stats.bytes_dropped_incomplete;
         total_bytes_received = conn_stats.bytes_received;
+        
+        dispatcher.waitUntilIdle();
     }
     
     if (!first_data_received) {
@@ -739,6 +889,7 @@ int main(int argc, char* argv[]) {
     
     if (!stats_disable) {
         std::cout << "=== Final Statistics ===" << std::endl;
+        dispatcher.waitUntilIdle();
         processor.finalizeRates();
         print_statistics(processor);
         print_recent_hits(processor, 10);

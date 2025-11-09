@@ -19,6 +19,7 @@ HitProcessor::HitProcessor()
 }
 
 void HitProcessor::resetStatistics() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_hits = 0;
     stats_.total_chunks = 0;
     stats_.total_tdc_events = 0;
@@ -35,10 +36,12 @@ void HitProcessor::resetStatistics() {
     stats_.cumulative_hit_rate_hz = 0.0;
     stats_.cumulative_tdc1_rate_hz = 0.0;
     stats_.cumulative_tdc2_rate_hz = 0.0;
-    stats_.chip_hit_rates_hz.clear();
-    stats_.chip_tdc1_counts.clear();
-    stats_.chip_tdc1_rates_hz.clear();
-    stats_.chip_tdc1_cumulative_rates_hz.clear();
+    stats_.chip_hit_rates_hz.fill(0.0);
+    stats_.chip_hit_rate_valid.fill(false);
+    stats_.chip_tdc1_counts.fill(0);
+    stats_.chip_tdc1_rates_hz.fill(0.0);
+    stats_.chip_tdc1_cumulative_rates_hz.fill(0.0);
+    stats_.chip_tdc1_present.fill(false);
     stats_.packet_byte_totals.clear();
     stats_.total_bytes_accounted = 0;
     stats_.earliest_hit_time_ticks = std::numeric_limits<uint64_t>::max();
@@ -58,19 +61,20 @@ void HitProcessor::resetStatistics() {
     hits_at_last_update_ = 0;
     tdc1_events_at_last_update_ = 0;
     tdc2_events_at_last_update_ = 0;
-    chip_hit_totals_.clear();
-    chip_hits_at_last_update_.clear();
-    chip_tdc1_at_last_update_.clear();
-    chip_tdc1_min_ticks_.clear();
-    chip_tdc1_max_ticks_.clear();
     calls_since_last_update_ = 0;
     last_hit_time_ticks_ = 0;
     last_tdc1_time_ticks_ = 0;
     recent_hits_head_ = 0;
     recent_hits_size_ = 0;
+    chip_hit_totals_.fill(0);
+    chip_hits_at_last_update_.fill(0);
+    chip_tdc1_at_last_update_.fill(0);
+    chip_tdc1_min_ticks_.fill(std::numeric_limits<uint64_t>::max());
+    chip_tdc1_max_ticks_.fill(0);
 }
 
 void HitProcessor::setRecentHitCapacity(size_t capacity) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     recent_hit_capacity_ = capacity;
     recent_hits_buffer_.assign(recent_hit_capacity_, PixelHit{});
     recent_hits_head_ = 0;
@@ -78,6 +82,7 @@ void HitProcessor::setRecentHitCapacity(size_t capacity) {
 }
 
 std::vector<PixelHit> HitProcessor::getRecentHits() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<PixelHit> result;
     if (recent_hit_capacity_ == 0 || recent_hits_size_ == 0 || recent_hits_buffer_.empty()) {
         return result;
@@ -95,15 +100,18 @@ std::vector<PixelHit> HitProcessor::getRecentHits() const {
 }
 
 void HitProcessor::clearHits() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     recent_hits_head_ = 0;
     recent_hits_size_ = 0;
 }
 
 void HitProcessor::markMidStreamStart() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.started_mid_stream = true;
 }
 
 void HitProcessor::addHit(const PixelHit& hit) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (recent_hit_capacity_ > 0) {
         if (recent_hits_buffer_.size() != recent_hit_capacity_) {
             recent_hits_buffer_.assign(recent_hit_capacity_, PixelHit{});
@@ -116,7 +124,10 @@ void HitProcessor::addHit(const PixelHit& hit) {
     }
 
     stats_.total_hits++;
-    chip_hit_totals_[hit.chip_index]++;
+    if (hit.chip_index < chip_hit_totals_.size()) {
+        chip_hit_totals_[hit.chip_index]++;
+        stats_.chip_hit_rate_valid[hit.chip_index] = true;
+    }
 
     if (start_time_ns_ == 0) {
         auto now = std::chrono::steady_clock::now();
@@ -143,6 +154,7 @@ void HitProcessor::addHit(const PixelHit& hit) {
 }
 
 void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_tdc_events++;
 
     if (start_time_ns_ == 0) {
@@ -164,16 +176,14 @@ void HitProcessor::addTdcEvent(const TDCEvent& tdc, uint8_t chip_index) {
             stats_.latest_tdc1_time_ticks = tdc.timestamp_ns;
         }
         stats_.total_tdc1_events++;
-        stats_.chip_tdc1_counts[chip_index]++;
-        auto min_it = chip_tdc1_min_ticks_.find(chip_index);
-        if (min_it == chip_tdc1_min_ticks_.end()) {
-            chip_tdc1_min_ticks_[chip_index] = tdc.timestamp_ns;
-            chip_tdc1_max_ticks_[chip_index] = tdc.timestamp_ns;
-        } else {
-            if (tdc.timestamp_ns < min_it->second) {
-                min_it->second = tdc.timestamp_ns;
-            }
+        if (chip_index < stats_.chip_tdc1_counts.size()) {
+            stats_.chip_tdc1_counts[chip_index]++;
+            stats_.chip_tdc1_present[chip_index] = true;
+            auto& min_entry = chip_tdc1_min_ticks_[chip_index];
             auto& max_entry = chip_tdc1_max_ticks_[chip_index];
+            if (min_entry == std::numeric_limits<uint64_t>::max() || tdc.timestamp_ns < min_entry) {
+                min_entry = tdc.timestamp_ns;
+            }
             if (tdc.timestamp_ns > max_entry) {
                 max_entry = tdc.timestamp_ns;
             }
@@ -190,6 +200,7 @@ void HitProcessor::updateReorderStats(uint64_t packets_reordered,
                                       uint64_t max_reorder_distance,
                                       uint64_t buffer_overflows,
                                       uint64_t packets_dropped_too_old) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_reordered_packets = packets_reordered;
     stats_.reorder_max_distance = max_reorder_distance;
     stats_.reorder_buffer_overflows = buffer_overflows;
@@ -197,19 +208,23 @@ void HitProcessor::updateReorderStats(uint64_t packets_reordered,
 }
 
 void HitProcessor::addPacketBytes(const std::string& category, uint64_t bytes) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.packet_byte_totals[category] += bytes;
     stats_.total_bytes_accounted += bytes;
 }
 
 void HitProcessor::incrementChunkCount() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_chunks++;
 }
 
 void HitProcessor::processChunkMetadata(const ChunkMetadata&) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // Reserved for future metadata-driven features
 }
 
 void HitProcessor::updateHitRate() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto now = std::chrono::steady_clock::now();
     uint64_t current_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
@@ -289,38 +304,25 @@ void HitProcessor::updateHitRate() {
         uint64_t new_tdc2_events = stats_.total_tdc2_events - tdc2_events_at_last_update_;
         stats_.tdc2_rate_hz = new_tdc2_events / elapsed_seconds;
 
-        stats_.chip_hit_rates_hz.clear();
-        for (const auto& pair : chip_hit_totals_) {
-            uint8_t chip = pair.first;
-            uint64_t current_count = pair.second;
-            uint64_t last_count = 0;
-            auto last_it = chip_hits_at_last_update_.find(chip);
-            if (last_it != chip_hits_at_last_update_.end()) {
-                last_count = last_it->second;
-            }
+        for (size_t chip = 0; chip < chip_hit_totals_.size(); ++chip) {
+            uint64_t current_count = chip_hit_totals_[chip];
+            uint64_t last_count = chip_hits_at_last_update_[chip];
             uint64_t new_chip_hits = current_count - last_count;
-            if (data_span_hits > 0.0) {
-                stats_.chip_hit_rates_hz[chip] = new_chip_hits / data_span_hits;
-            } else {
-                stats_.chip_hit_rates_hz[chip] = new_chip_hits / elapsed_seconds;
-            }
+            double rate = (data_span_hits > 0.0)
+                ? (new_chip_hits / data_span_hits)
+                : (new_chip_hits / elapsed_seconds);
+            stats_.chip_hit_rates_hz[chip] = rate;
+            stats_.chip_hit_rate_valid[chip] = (current_count > 0);
         }
 
-        stats_.chip_tdc1_rates_hz.clear();
-        for (const auto& pair : stats_.chip_tdc1_counts) {
-            uint8_t chip = pair.first;
-            uint64_t current_count = pair.second;
-            uint64_t last_count = 0;
-            auto last_it = chip_tdc1_at_last_update_.find(chip);
-            if (last_it != chip_tdc1_at_last_update_.end()) {
-                last_count = last_it->second;
-            }
+        for (size_t chip = 0; chip < stats_.chip_tdc1_counts.size(); ++chip) {
+            uint64_t current_count = stats_.chip_tdc1_counts[chip];
+            uint64_t last_count = chip_tdc1_at_last_update_[chip];
             uint64_t new_tdc1_events_chip = current_count - last_count;
-            if (data_span_tdc1 > 0.0) {
-                stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events_chip / data_span_tdc1;
-            } else {
-                stats_.chip_tdc1_rates_hz[chip] = new_tdc1_events_chip / elapsed_seconds;
-            }
+            double rate = (data_span_tdc1 > 0.0)
+                ? (new_tdc1_events_chip / data_span_tdc1)
+                : (new_tdc1_events_chip / elapsed_seconds);
+            stats_.chip_tdc1_rates_hz[chip] = rate;
         }
 
         last_update_time_ns_ = current_time_ns;
@@ -334,19 +336,17 @@ void HitProcessor::updateHitRate() {
     }
 
     // Always refresh per-chip cumulative TDC1 rates
-    stats_.chip_tdc1_cumulative_rates_hz.clear();
-    for (const auto& pair : stats_.chip_tdc1_counts) {
-        uint8_t chip = pair.first;
-        uint64_t count = pair.second;
+    for (size_t chip = 0; chip < stats_.chip_tdc1_counts.size(); ++chip) {
+        uint64_t count = stats_.chip_tdc1_counts[chip];
         double chip_span_seconds = 0.0;
-        auto min_it = chip_tdc1_min_ticks_.find(chip);
-        auto max_it = chip_tdc1_max_ticks_.find(chip);
-        if (min_it != chip_tdc1_min_ticks_.end() && max_it != chip_tdc1_max_ticks_.end() &&
-            max_it->second > min_it->second) {
-            chip_span_seconds = (max_it->second - min_it->second) * TOA_UNIT_SECONDS;
+        uint64_t min_tick = chip_tdc1_min_ticks_[chip];
+        uint64_t max_tick = chip_tdc1_max_ticks_[chip];
+        if (max_tick > min_tick) {
+            chip_span_seconds = (max_tick - min_tick) * TOA_UNIT_SECONDS;
         }
         if (chip_span_seconds > 0.0) {
             stats_.chip_tdc1_cumulative_rates_hz[chip] = count / chip_span_seconds;
+            stats_.chip_tdc1_present[chip] = (count > 0);
         } else if (start_time_ns_ > 0) {
             uint64_t total_elapsed_ns = current_time_ns - start_time_ns_;
             if (total_elapsed_ns > 0) {
@@ -357,26 +357,32 @@ void HitProcessor::updateHitRate() {
         } else {
             stats_.chip_tdc1_cumulative_rates_hz[chip] = 0.0;
         }
+        stats_.chip_tdc1_present[chip] = stats_.chip_tdc1_present[chip] || (count > 0);
     }
 }
 
 void HitProcessor::incrementDecodeError() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_decode_errors++;
 }
 
 void HitProcessor::incrementFractionalError() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_fractional_errors++;
 }
 
 void HitProcessor::incrementUnknownPacket() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.total_unknown_packets++;
 }
 
 void HitProcessor::incrementPacketType(uint8_t packet_type) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     stats_.packet_type_counts[packet_type]++;
 }
 
 void HitProcessor::finalizeRates() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     updateHitRate();
 
     constexpr double TOA_UNIT_SECONDS = 1.5625e-9;
@@ -396,15 +402,26 @@ void HitProcessor::finalizeRates() {
     if (stats_.tdc1_rate_hz == 0.0 && data_span_tdc1 > 0.0) {
         stats_.tdc1_rate_hz = stats_.total_tdc1_events / data_span_tdc1;
     }
-    if (stats_.chip_hit_rates_hz.empty() && data_span_hits > 0.0) {
-        for (const auto& pair : chip_hit_totals_) {
-            stats_.chip_hit_rates_hz[pair.first] = pair.second / data_span_hits;
+    if (data_span_hits > 0.0) {
+        for (size_t chip = 0; chip < chip_hit_totals_.size(); ++chip) {
+            if (!stats_.chip_hit_rate_valid[chip]) {
+                stats_.chip_hit_rates_hz[chip] = chip_hit_totals_[chip] / data_span_hits;
+                stats_.chip_hit_rate_valid[chip] = (chip_hit_totals_[chip] > 0);
+            }
         }
     }
-    if (stats_.chip_tdc1_rates_hz.empty() && data_span_tdc1 > 0.0) {
-        for (const auto& pair : stats_.chip_tdc1_counts) {
-            stats_.chip_tdc1_rates_hz[pair.first] = pair.second / data_span_tdc1;
+    if (data_span_tdc1 > 0.0) {
+        for (size_t chip = 0; chip < stats_.chip_tdc1_counts.size(); ++chip) {
+            if (!stats_.chip_tdc1_present[chip]) {
+                stats_.chip_tdc1_rates_hz[chip] = stats_.chip_tdc1_counts[chip] / data_span_tdc1;
+                stats_.chip_tdc1_present[chip] = (stats_.chip_tdc1_counts[chip] > 0);
+            }
         }
     }
+}
+
+Statistics HitProcessor::getStatistics() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return stats_;
 }
 

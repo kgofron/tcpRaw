@@ -12,9 +12,11 @@
 #include "tpx3_packets.h"
 #include <vector>
 #include <cstdint>
+#include <array>
 #include <map>
 #include <string>
 #include <limits>
+#include <mutex>
 
 struct Statistics {
     uint64_t total_hits;
@@ -33,10 +35,12 @@ struct Statistics {
     double cumulative_hit_rate_hz;  // Cumulative average: total_hits / elapsed_time
     double cumulative_tdc1_rate_hz;  // Cumulative average: total_tdc1_events / elapsed_time
     double cumulative_tdc2_rate_hz;  // Cumulative average: total_tdc2_events / elapsed_time
-    std::map<uint8_t, double> chip_hit_rates_hz;  // Per-chip hit rates
-    std::map<uint8_t, uint64_t> chip_tdc1_counts;  // Per-chip TDC1 event counts
-    std::map<uint8_t, double> chip_tdc1_rates_hz;  // Per-chip TDC1 rates
-    std::map<uint8_t, double> chip_tdc1_cumulative_rates_hz; // Per-chip cumulative TDC1 rates
+    std::array<double, 4> chip_hit_rates_hz;
+    std::array<bool, 4> chip_hit_rate_valid;
+    std::array<uint64_t, 4> chip_tdc1_counts;
+    std::array<double, 4> chip_tdc1_rates_hz;
+    std::array<double, 4> chip_tdc1_cumulative_rates_hz;
+    std::array<bool, 4> chip_tdc1_present;
     std::map<std::string, uint64_t> packet_byte_totals; // Bytes accounted per packet category
     uint64_t total_bytes_accounted;  // Total bytes accounted across all categories
     uint64_t earliest_hit_time_ticks;
@@ -73,7 +77,7 @@ public:
     void setRecentHitCapacity(size_t capacity);
     std::vector<PixelHit> getRecentHits() const;
     std::vector<PixelHit> getHits() const { return getRecentHits(); } // Legacy compatibility
-    const Statistics& getStatistics() const { return stats_; }
+    Statistics getStatistics() const;
     void markMidStreamStart();
     bool startedMidStream() const { return stats_.started_mid_stream; }
     void finalizeRates();
@@ -93,14 +97,15 @@ private:
     uint64_t hits_at_last_update_;
     uint64_t tdc1_events_at_last_update_;
     uint64_t tdc2_events_at_last_update_;
-    std::map<uint8_t, uint64_t> chip_hit_totals_;
-    std::map<uint8_t, uint64_t> chip_hits_at_last_update_;
-    std::map<uint8_t, uint64_t> chip_tdc1_at_last_update_;
-    std::map<uint8_t, uint64_t> chip_tdc1_min_ticks_;
-    std::map<uint8_t, uint64_t> chip_tdc1_max_ticks_;
+    std::array<uint64_t, 4> chip_hit_totals_;
+    std::array<uint64_t, 4> chip_hits_at_last_update_;
+    std::array<uint64_t, 4> chip_tdc1_at_last_update_;
+    std::array<uint64_t, 4> chip_tdc1_min_ticks_;
+    std::array<uint64_t, 4> chip_tdc1_max_ticks_;
     uint64_t calls_since_last_update_;
     uint64_t last_hit_time_ticks_;
     uint64_t last_tdc1_time_ticks_;
+    mutable std::recursive_mutex mutex_;
     
     void updateHitRate();
 };

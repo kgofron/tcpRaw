@@ -3,7 +3,7 @@
  *         Oak Ridge National Laboratory
  *
  * Created:  November 2, 2025
- * Modified: November 4, 2025
+ * Modified: November 8, 2025
  */
 
 #include "tcp_server.h"
@@ -21,6 +21,7 @@
 #include <iomanip>
 #include <chrono>
 #include <sstream>
+#include <vector>
 
 TCPServer::TCPServer(const char* host, uint16_t port)
     : host_(host), port_(port), socket_(-1), 
@@ -189,19 +190,19 @@ void TCPServer::run(DataCallback data_cb) {
         }
         
         // Connected, now read data
-        constexpr size_t BUFFER_SIZE = 8192; // 8KB buffer
-        uint8_t buffer[BUFFER_SIZE + 8];  // Extra space for incomplete bytes
+        constexpr size_t BUFFER_SIZE = 1024 * 1024; // 1MB buffer for high throughput
+        std::vector<uint8_t> buffer(BUFFER_SIZE + 8);  // Extra space for incomplete bytes
         
         while (connected_ && !should_stop_) {
             // First, copy any incomplete bytes from previous recv() to start of buffer
             size_t bytes_to_process = incomplete_buffer_size_;
             if (incomplete_buffer_size_ > 0) {
-                std::memcpy(buffer, incomplete_buffer_, incomplete_buffer_size_);
+                std::memcpy(buffer.data(), incomplete_buffer_, incomplete_buffer_size_);
             }
             
             // Read new data after the incomplete bytes
             size_t bytes_to_read = BUFFER_SIZE;
-            ssize_t bytes_read = recv(socket_, buffer + incomplete_buffer_size_, bytes_to_read, 0);
+            ssize_t bytes_read = recv(socket_, buffer.data() + incomplete_buffer_size_, bytes_to_read, 0);
             
             if (bytes_read == 0) {
                 // Connection closed by peer
@@ -243,13 +244,13 @@ void TCPServer::run(DataCallback data_cb) {
             // Process complete 8-byte words
             size_t complete_words = (bytes_to_process / 8) * 8;
             if (complete_words > 0 && data_cb) {
-                data_cb(buffer, complete_words);
+                data_cb(buffer.data(), complete_words);
             }
             
             // Save incomplete bytes for next recv() call
             size_t incomplete_bytes = bytes_to_process % 8;
             if (incomplete_bytes > 0) {
-                std::memcpy(incomplete_buffer_, buffer + complete_words, incomplete_bytes);
+                std::memcpy(incomplete_buffer_, buffer.data() + complete_words, incomplete_bytes);
                 incomplete_buffer_size_ = incomplete_bytes;
             } else {
                 incomplete_buffer_size_ = 0;

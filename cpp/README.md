@@ -3,7 +3,7 @@
 **Author:** Kazimierz Gofron  
 **Institution:** Oak Ridge National Laboratory  
 **Created:** November 2, 2025  
-**Modified:** November 4, 2025
+**Modified:** November 8, 2025
 
 C++ implementation for parsing Timepix3 raw data from TCP stream, with support for all packet types and experimental time extension.
 
@@ -25,7 +25,8 @@ This program receives TPX3 raw data via TCP socket connection on port 8085, deco
 - **Statistics Tracking**: Real-time hit counting and rate calculation (instant and cumulative)
 - **TDC1/TDC2 Rate Tracking**: Separate rate tracking for TDC1 and TDC2 events
 - **Per-Chip Statistics**: Individual hit rates for each chip (0-3)
-- **Efficient Buffering**: 8-byte aligned data processing with incomplete word buffering
+- **Parallel Decode Pipeline**: Per-chip worker threads keep up with high-rate streams
+- **Efficient Buffering**: 1MB socket reads with incomplete word buffering to minimize syscalls
 - **Connection Monitoring**: Comprehensive connection statistics and error tracking
 - **Packet Reordering**: Optional chunk-aware packet reordering for out-of-order packets
 - **High-Rate Performance**: Configurable statistics output for rates up to 140 MHz
@@ -124,6 +125,7 @@ The parser will:
 - `--stats-time N` - Print status every N seconds (default: 10, 0=disable)
 - `--stats-final-only` - Only print final statistics (no periodic)
 - `--stats-disable` - Disable all statistics printing
+- `--recent-hit-count N` - Retain the last N hits for the summary (default: 10, 0=disable)
 
 **Control options:**
 - `--exit-on-disconnect` - Exit after connection closes (don't auto-reconnect)
