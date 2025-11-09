@@ -86,6 +86,7 @@ public:
     void resetStatistics();
     
 private:
+    friend class DecodeDispatcher;
     size_t recent_hit_capacity_;
     std::vector<PixelHit> recent_hits_buffer_;
     size_t recent_hits_head_;

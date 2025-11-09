@@ -64,25 +64,115 @@ struct DecodeTask {
 
 class DecodeDispatcher {
 public:
-    DecodeDispatcher(size_t num_workers, HitProcessor& processor)
+    struct PartialStats {
+        uint64_t hits = 0;
+        uint64_t tdc1 = 0;
+        uint64_t tdc2 = 0;
+        uint64_t earliest_hit_tick = std::numeric_limits<uint64_t>::max();
+        uint64_t latest_hit_tick = 0;
+        uint64_t earliest_tdc1_tick = std::numeric_limits<uint64_t>::max();
+        uint64_t latest_tdc1_tick = 0;
+        std::array<uint64_t, 4> chip_hits{};
+        std::array<uint64_t, 4> chip_tdc1{};
+        std::array<uint64_t, 4> chip_tdc2{};
+        std::array<uint64_t, 4> chip_tdc1_min{};
+        std::array<uint64_t, 4> chip_tdc1_max{};
+        std::vector<PixelHit> recent_hits;
+
+        void mergeInto(HitProcessor& processor) {
+            if (hits == 0 && tdc1 == 0 && tdc2 == 0 && recent_hits.empty()) {
+                return;
+            }
+            std::lock_guard<std::recursive_mutex> lock(processor.mutex_);
+            processor.stats_.total_hits += hits;
+            processor.stats_.total_tdc1_events += tdc1;
+            processor.stats_.total_tdc2_events += tdc2;
+            processor.stats_.total_tdc_events += (tdc1 + tdc2);
+            for (size_t chip = 0; chip < 4; ++chip) {
+                processor.chip_hit_totals_[chip] += chip_hits[chip];
+                processor.stats_.chip_hit_rate_valid[chip] =
+                    processor.stats_.chip_hit_rate_valid[chip] || chip_hits[chip] > 0;
+                processor.stats_.chip_tdc1_counts[chip] += chip_tdc1[chip];
+                if (chip_tdc1[chip] > 0) {
+                    processor.stats_.chip_tdc1_present[chip] = true;
+                    processor.chip_tdc1_min_ticks_[chip] =
+                        std::min(processor.chip_tdc1_min_ticks_[chip], chip_tdc1_min[chip]);
+                    processor.chip_tdc1_max_ticks_[chip] =
+                        std::max(processor.chip_tdc1_max_ticks_[chip], chip_tdc1_max[chip]);
+                }
+            }
+            if (hits > 0) {
+                if (!processor.stats_.hit_time_initialized ||
+                    earliest_hit_tick < processor.stats_.earliest_hit_time_ticks) {
+                    processor.stats_.earliest_hit_time_ticks = earliest_hit_tick;
+                    processor.stats_.hit_time_initialized = true;
+                }
+                if (latest_hit_tick > processor.stats_.latest_hit_time_ticks) {
+                    processor.stats_.latest_hit_time_ticks = latest_hit_tick;
+                }
+            }
+            if (tdc1 > 0) {
+                if (!processor.stats_.tdc1_time_initialized ||
+                    earliest_tdc1_tick < processor.stats_.earliest_tdc1_time_ticks) {
+                    processor.stats_.earliest_tdc1_time_ticks = earliest_tdc1_tick;
+                    processor.stats_.tdc1_time_initialized = true;
+                }
+                if (latest_tdc1_tick > processor.stats_.latest_tdc1_time_ticks) {
+                    processor.stats_.latest_tdc1_time_ticks = latest_tdc1_tick;
+                }
+            }
+            if (processor.recent_hit_capacity_ > 0) {
+                for (const auto& hit : recent_hits) {
+                    if (processor.recent_hits_buffer_.size() != processor.recent_hit_capacity_) {
+                        processor.recent_hits_buffer_.assign(
+                            processor.recent_hit_capacity_, PixelHit{});
+                    }
+                    processor.recent_hits_buffer_[processor.recent_hits_head_] = hit;
+                    processor.recent_hits_head_ =
+                        (processor.recent_hits_head_ + 1) % processor.recent_hit_capacity_;
+                    if (processor.recent_hits_size_ < processor.recent_hit_capacity_) {
+                        processor.recent_hits_size_++;
+                    }
+                }
+            }
+        }
+
+        void reset(size_t recent_capacity) {
+            hits = tdc1 = tdc2 = 0;
+            earliest_hit_tick = std::numeric_limits<uint64_t>::max();
+            latest_hit_tick = 0;
+            earliest_tdc1_tick = std::numeric_limits<uint64_t>::max();
+            latest_tdc1_tick = 0;
+            chip_hits.fill(0);
+            chip_tdc1.fill(0);
+            chip_tdc2.fill(0);
+            chip_tdc1_min.fill(std::numeric_limits<uint64_t>::max());
+            chip_tdc1_max.fill(0);
+            recent_hits.clear();
+            if (recent_capacity > 0) {
+                recent_hits.reserve(recent_capacity);
+            }
+        }
+    };
+
+    DecodeDispatcher(size_t num_workers, HitProcessor& processor, size_t recent_cap)
         : processor_(processor),
           stop_(false),
-          pending_tasks_(0) {
+          pending_tasks_(0),
+          recent_capacity_(recent_cap) {
         size_t workers = std::max<size_t>(1, num_workers);
         worker_data_.reserve(workers);
         for (size_t i = 0; i < workers; ++i) {
-            worker_data_.emplace_back(std::make_unique<WorkerData>());
+            worker_data_.emplace_back(std::make_unique<WorkerData>(recent_capacity_));
         }
         workers_.reserve(workers);
         for (size_t i = 0; i < workers; ++i) {
             workers_.emplace_back([this, i]() { workerLoop(i); });
         }
     }
-    
-    ~DecodeDispatcher() {
-        stop();
-    }
-    
+
+    ~DecodeDispatcher() { stop(); }
+
     void submit(uint64_t word, uint8_t chip_index, const ChunkMetadata& meta) {
         size_t index = chip_index % worker_data_.size();
         pending_tasks_.fetch_add(1, std::memory_order_release);
@@ -93,14 +183,15 @@ public:
         }
         data.cond.notify_one();
     }
-    
+
     void waitUntilIdle() {
         std::unique_lock<std::mutex> lock(pending_mutex_);
         idle_cv_.wait(lock, [this]() {
             return pending_tasks_.load(std::memory_order_acquire) == 0;
         });
+        flushAll();
     }
-    
+
     void stop() {
         bool expected = false;
         if (!stop_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
@@ -115,15 +206,27 @@ public:
             }
         }
         workers_.clear();
+        flushAll();
     }
-    
+
+    void flushAll() {
+        for (auto& data : worker_data_) {
+            flushWorker(*data);
+        }
+    }
+
 private:
     struct WorkerData {
+        explicit WorkerData(size_t recent_capacity) : stats() {
+            stats.reset(recent_capacity);
+        }
         std::mutex mutex;
         std::condition_variable cond;
         std::queue<DecodeTask> queue;
+        std::mutex stats_mutex;
+        PartialStats stats;
     };
-    
+
     HitProcessor& processor_;
     std::vector<std::thread> workers_;
     std::vector<std::unique_ptr<WorkerData>> worker_data_;
@@ -131,7 +234,8 @@ private:
     std::atomic<size_t> pending_tasks_;
     std::mutex pending_mutex_;
     std::condition_variable idle_cv_;
-    
+    size_t recent_capacity_;
+
     void workerLoop(size_t index) {
         while (true) {
             DecodeTask task;
@@ -141,11 +245,11 @@ private:
                 data.cond.wait(lock, [this, &data]() {
                     return stop_.load(std::memory_order_acquire) || !data.queue.empty();
                 });
-                
+
                 if (stop_.load(std::memory_order_acquire) && data.queue.empty()) {
                     break;
                 }
-                
+
                 if (!data.queue.empty()) {
                     task = data.queue.front();
                     data.queue.pop();
@@ -153,15 +257,92 @@ private:
                     continue;
                 }
             }
-            
-            process_packet(task.word, task.chip_index, processor_, task.chunk_meta);
-            
-            size_t remaining = pending_tasks_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+
+            processDecoded(task, *worker_data_[index]);
+
+            size_t remaining =
+                pending_tasks_.fetch_sub(1, std::memory_order_acq_rel) - 1;
             if (remaining == 0) {
                 std::lock_guard<std::mutex> lock(pending_mutex_);
                 idle_cv_.notify_all();
             }
         }
+    }
+
+    void processDecoded(const DecodeTask& task, WorkerData& data) {
+        PartialStats& stats = data.stats;
+        uint8_t full_type = (task.word >> 56) & 0xFF;
+        if (full_type == SPIDR_PACKET_ID || full_type == TPX3_CONTROL ||
+            full_type == EXTRA_TIMESTAMP || full_type == EXTRA_TIMESTAMP_MPX3 ||
+            full_type == GLOBAL_TIME_LOW || full_type == GLOBAL_TIME_HIGH) {
+            process_packet(task.word, task.chip_index, processor_, task.chunk_meta);
+            return;
+        }
+        uint8_t packet_type = (task.word >> 60) & 0xF;
+        switch (packet_type) {
+            case PIXEL_COUNT_FB:
+            case PIXEL_STANDARD: {
+                try {
+                    PixelHit hit = decode_pixel_data(task.word, task.chip_index);
+                    if (task.chunk_meta.has_extra_packets) {
+                        uint64_t truncated_toa = hit.toa_ns & 0x3FFFFFFF;
+                        hit.toa_ns =
+                            extend_timestamp(truncated_toa, task.chunk_meta.min_timestamp_ns, 30);
+                    }
+                    std::lock_guard<std::mutex> lock(data.stats_mutex);
+                    stats.hits++;
+                    stats.chip_hits[hit.chip_index]++;
+                    stats.earliest_hit_tick =
+                        std::min(stats.earliest_hit_tick, hit.toa_ns);
+                    stats.latest_hit_tick =
+                        std::max(stats.latest_hit_tick, hit.toa_ns);
+                    if (recent_capacity_ > 0 &&
+                        stats.recent_hits.size() < recent_capacity_) {
+                        stats.recent_hits.push_back(hit);
+                    }
+                } catch (...) {
+                    process_packet(task.word, task.chip_index, processor_, task.chunk_meta);
+                }
+                break;
+            }
+            case TDC_DATA: {
+                try {
+                    TDCEvent tdc = decode_tdc_data(task.word);
+                    std::lock_guard<std::mutex> lock(data.stats_mutex);
+                    if (tdc.type == TDC1_RISE || tdc.type == TDC1_FALL) {
+                        stats.tdc1++;
+                        stats.chip_tdc1[task.chip_index]++;
+                        stats.earliest_tdc1_tick =
+                            std::min(stats.earliest_tdc1_tick, tdc.timestamp_ns);
+                        stats.latest_tdc1_tick =
+                            std::max(stats.latest_tdc1_tick, tdc.timestamp_ns);
+                        stats.chip_tdc1_min[task.chip_index] =
+                            std::min(stats.chip_tdc1_min[task.chip_index], tdc.timestamp_ns);
+                        stats.chip_tdc1_max[task.chip_index] =
+                            std::max(stats.chip_tdc1_max[task.chip_index], tdc.timestamp_ns);
+                    } else if (tdc.type == TDC2_RISE || tdc.type == TDC2_FALL) {
+                        stats.tdc2++;
+                        stats.chip_tdc2[task.chip_index]++;
+                    }
+                } catch (...) {
+                    process_packet(task.word, task.chip_index, processor_, task.chunk_meta);
+                }
+                break;
+            }
+            default:
+                process_packet(task.word, task.chip_index, processor_, task.chunk_meta);
+                break;
+        }
+    }
+
+    void flushWorker(WorkerData& data) {
+        PartialStats local;
+        {
+            std::lock_guard<std::mutex> lock(data.stats_mutex);
+            local = data.stats;
+            data.stats.reset(recent_capacity_);
+        }
+        local.mergeInto(processor_);
     }
 };
 
@@ -666,7 +847,7 @@ int main(int argc, char* argv[]) {
     
     std::unique_ptr<DecodeDispatcher> dispatcher;
     if (worker_count > 1) {
-        dispatcher = std::make_unique<DecodeDispatcher>(worker_count, processor);
+        dispatcher = std::make_unique<DecodeDispatcher>(worker_count, processor, recent_hit_count);
     }
     
     std::unique_ptr<PacketReorderBuffer> reorder_buffer;
@@ -767,6 +948,9 @@ int main(int argc, char* argv[]) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     now - last_status_print).count();
                 if (elapsed >= stats_time_interval) {
+                    if (dispatcher) {
+                        dispatcher->flushAll();
+                    }
                     const Statistics& stats = processor.getStatistics();
                     uint64_t hits_diff = stats.total_hits - last_hits;
                     std::cout << "[Status] Processed " << hits_diff << " hits in last "
@@ -862,6 +1046,9 @@ int main(int argc, char* argv[]) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     now - last_status_print).count();
                 if (elapsed >= stats_time_interval) {
+                    if (dispatcher) {
+                        dispatcher->flushAll();
+                    }
                     const Statistics& stats = processor.getStatistics();
                     uint64_t hits_diff = stats.total_hits - last_hits;
                     std::cout << "[Status] Processed " << hits_diff << " hits in last "
