@@ -46,6 +46,8 @@ struct StreamState {
     size_t chunk_words_remaining = 0;
     uint8_t chip_index = 0;
     uint64_t current_chunk_id = 0;
+    uint64_t local_chunk_count = 0;  // Local counter to avoid mutex locks
+    uint64_t pending_chunk_updates = 0;  // Batch chunk count updates
     ChunkMetadata chunk_meta{};
     std::vector<ExtraTimestamp> extra_timestamps;
     bool saw_first_chunk_header = false;
@@ -264,11 +266,17 @@ public:
         size_t index = chip_index % worker_data_.size();
         pending_tasks_.fetch_add(1, std::memory_order_release);
         auto& data = *worker_data_[index];
+        bool was_empty = false;
         {
             std::lock_guard<std::mutex> lock(data.mutex);
+            was_empty = data.queue.empty();
             data.queue.push(DecodeTask{word, chip_index, meta});
         }
-        data.cond.notify_one();
+        // Only notify if queue was empty (worker was waiting)
+        // This reduces unnecessary wake-ups when queue already has work
+        if (was_empty) {
+            data.cond.notify_one();
+        }
     }
 
     void waitUntilIdle() {
@@ -574,12 +582,10 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
     for (size_t i = 0; i < num_words; ++i) {
         uint64_t word = data_words[i];
         
-        // Check if this is a chunk header
-        TPX3ChunkHeader header;
-        header.data = word;
-        
-        if (header.isValid()) {
-            // Found chunk header
+        // Fast inline chunk header check (avoid struct creation on hot path)
+        // TPX3_MAGIC is 0x33585054 ('TPX3' in little-endian)
+        if ((word & 0xFFFFFFFFULL) == TPX3_MAGIC) {
+            // Found chunk header - inline field access to avoid struct creation
             if (enable_accounting) {
                 processor.addPacketBytes("Chunk header", 8);
             }
@@ -588,10 +594,25 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
             // So we set chunk_words_remaining to chunkSize/8, which includes header
             // We then continue to skip the header, so we process (chunkSize/8 - 1) data words
             state.in_chunk = true;
-            state.chunk_words_remaining = header.chunkSize() / 8;
-            state.chip_index = header.chipIndex();
-            processor.incrementChunkCount();
-            state.current_chunk_id = processor.getStatistics().total_chunks;
+            // Inline field access: chunkSize() = (word >> 48) & 0xFFFF, chipIndex() = (word >> 32) & 0xFF
+            state.chunk_words_remaining = ((word >> 48) & 0xFFFF) / 8;
+            state.chip_index = (word >> 32) & 0xFF;
+            
+            // Use local counter to avoid mutex lock on getStatistics()
+            // This eliminates the expensive getStatistics() call that acquires a mutex
+            state.local_chunk_count++;
+            state.current_chunk_id = state.local_chunk_count;
+            state.pending_chunk_updates++;
+            
+            // Batch update chunk count to reduce mutex contention (update every 100 chunks)
+            // In performance mode, batch updates significantly reduce lock contention
+            // Instead of 100 mutex locks, we use 1 mutex lock per 100 chunks
+            constexpr uint64_t CHUNK_UPDATE_BATCH = 100;
+            if (state.pending_chunk_updates >= CHUNK_UPDATE_BATCH) {
+                // Batch update: increment by pending count in a single mutex lock
+                processor.incrementChunkCountBatch(state.pending_chunk_updates);
+                state.pending_chunk_updates = 0;
+            }
             
             // If we have a reorder buffer, reset it for new chunk
             if (reorder_buffer) {
@@ -676,6 +697,12 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         if (state.chunk_words_remaining == 0) {
             state.in_chunk = false;
         }
+    }
+    
+    // Flush pending chunk count updates
+    if (state.pending_chunk_updates > 0) {
+        processor.incrementChunkCountBatch(state.pending_chunk_updates);
+        state.pending_chunk_updates = 0;
     }
     
     if (reorder_buffer) {

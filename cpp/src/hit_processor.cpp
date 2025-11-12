@@ -218,6 +218,12 @@ void HitProcessor::incrementChunkCount() {
     stats_.total_chunks++;
 }
 
+void HitProcessor::incrementChunkCountBatch(uint64_t count) {
+    if (count == 0) return;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    stats_.total_chunks += count;
+}
+
 void HitProcessor::processChunkMetadata(const ChunkMetadata&) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // Reserved for future metadata-driven features

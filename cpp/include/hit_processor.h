@@ -63,6 +63,7 @@ public:
     void addHit(const PixelHit& hit);
     void addTdcEvent(const TDCEvent& tdc, uint8_t chip_index);
     void incrementChunkCount();
+    void incrementChunkCountBatch(uint64_t count);  // Batch increment to reduce mutex contention
     void processChunkMetadata(const ChunkMetadata& metadata);
     void incrementDecodeError();
     void incrementFractionalError();
