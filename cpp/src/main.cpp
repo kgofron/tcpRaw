@@ -39,7 +39,7 @@ static std::string format_type_label(const std::string& prefix, uint8_t type) {
     return oss.str();
 }
 
-void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, const ChunkMetadata& chunk_meta);
+void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, const ChunkMetadata& chunk_meta, bool enable_accounting = true);
 
 struct StreamState {
     bool in_chunk = false;
@@ -434,12 +434,14 @@ private:
 };
 
 // Helper function to process a single packet (used by reorder buffer callback)
-void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, const ChunkMetadata& chunk_meta) {
+void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, const ChunkMetadata& chunk_meta, bool enable_accounting) {
     // Check full-byte types first (0x50, 0x71, etc. that can't be distinguished by 4-bit)
     uint8_t full_type = (word >> 56) & 0xFF;
     
     if (full_type == SPIDR_PACKET_ID) {
-        processor.addPacketBytes("SPIDR packet ID (0x50)", 8);
+        if (enable_accounting) {
+            processor.addPacketBytes("SPIDR packet ID (0x50)", 8);
+        }
         // SPIDR packet ID (0x50)
         uint64_t packet_count;
         if (decode_spidr_packet_id(word, packet_count)) {
@@ -449,7 +451,9 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     }
     
     if (full_type == TPX3_CONTROL) {
-        processor.addPacketBytes("TPX3 control (0x71)", 8);
+        if (enable_accounting) {
+            processor.addPacketBytes("TPX3 control (0x71)", 8);
+        }
         // TPX3 control (0x71)
         Tpx3ControlCmd cmd;
         if (decode_tpx3_control(word, cmd)) {
@@ -459,13 +463,17 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     }
     
     if (full_type == EXTRA_TIMESTAMP || full_type == EXTRA_TIMESTAMP_MPX3) {
-        processor.addPacketBytes(format_type_label("Extra timestamp", full_type), 8);
+        if (enable_accounting) {
+            processor.addPacketBytes(format_type_label("Extra timestamp", full_type), 8);
+        }
         // Extra timestamp packets - handled separately in main processing loop
         return;
     }
     
     if (full_type == GLOBAL_TIME_LOW || full_type == GLOBAL_TIME_HIGH) {
-        processor.addPacketBytes(format_type_label("Global time", full_type), 8);
+        if (enable_accounting) {
+            processor.addPacketBytes(format_type_label("Global time", full_type), 8);
+        }
         // GlobalTime gt = decode_global_time(word);
         // Future: Use for time extension
         return;
@@ -473,15 +481,19 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     
     // For other packets, use 4-bit type
     uint8_t packet_type = (word >> 60) & 0xF;
-    processor.incrementPacketType(packet_type);
+    if (enable_accounting) {
+        processor.incrementPacketType(packet_type);
+    }
     
     switch (packet_type) {
         case PIXEL_COUNT_FB:
         case PIXEL_STANDARD: {
-            if (packet_type == PIXEL_COUNT_FB) {
-                processor.addPacketBytes("Pixel count_fb (0x0a)", 8);
-            } else {
-                processor.addPacketBytes("Pixel standard (0x0b)", 8);
+            if (enable_accounting) {
+                if (packet_type == PIXEL_COUNT_FB) {
+                    processor.addPacketBytes("Pixel count_fb (0x0a)", 8);
+                } else {
+                    processor.addPacketBytes("Pixel standard (0x0b)", 8);
+                }
             }
             try {
                 PixelHit hit = decode_pixel_data(word, chip_index);
@@ -506,7 +518,9 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
         }
         
         case TDC_DATA: {
-            processor.addPacketBytes("TDC data (0x06)", 8);
+            if (enable_accounting) {
+                processor.addPacketBytes("TDC data (0x06)", 8);
+            }
             try {
                 TDCEvent tdc = decode_tdc_data(word);
                 processor.addTdcEvent(tdc, chip_index);
@@ -527,7 +541,9 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
         }
         
         case SPIDR_CONTROL: {
-            processor.addPacketBytes("SPIDR control (0x05)", 8);
+            if (enable_accounting) {
+                processor.addPacketBytes("SPIDR control (0x05)", 8);
+            }
             SpidrControl ctrl;
             if (decode_spidr_control(word, ctrl)) {
                 processor.incrementChunkCount();
@@ -536,12 +552,13 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
         }
         
         default: {
-            std::ostringstream label;
-            label << "Unknown packet type (0x" << std::hex << std::uppercase
-                  << static_cast<int>(packet_type) << ")";
-            processor.addPacketBytes(label.str(), 8);
-            // Unknown packet type
-            processor.incrementUnknownPacket();
+            if (enable_accounting) {
+                std::ostringstream label;
+                label << "Unknown packet type (0x" << std::hex << std::uppercase
+                      << static_cast<int>(packet_type) << ")";
+                processor.addPacketBytes(label.str(), 8);
+                processor.incrementUnknownPacket();
+            }
             break;
         }
     }
@@ -549,7 +566,8 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
 
 // Process raw data buffer
 void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, StreamState& state,
-                      DecodeDispatcher* dispatcher, PacketReorderBuffer* reorder_buffer = nullptr) {
+                      DecodeDispatcher* dispatcher, PacketReorderBuffer* reorder_buffer = nullptr,
+                      bool enable_accounting = true) {
     const uint64_t* data_words = reinterpret_cast<const uint64_t*>(buffer);
     size_t num_words = bytes / 8;
     
@@ -562,7 +580,9 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         
         if (header.isValid()) {
             // Found chunk header
-            processor.addPacketBytes("Chunk header", 8);
+            if (enable_accounting) {
+                processor.addPacketBytes("Chunk header", 8);
+            }
             state.saw_first_chunk_header = true;
             // Note: chunk size includes the header word itself
             // So we set chunk_words_remaining to chunkSize/8, which includes header
@@ -590,7 +610,9 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                 processor.markMidStreamStart();
                 state.mid_stream_flagged = true;
             }
-            processor.addPacketBytes("Unassigned (outside chunk)", 8);
+            if (enable_accounting) {
+                processor.addPacketBytes("Unassigned (outside chunk)", 8);
+            }
             continue;
         }
         
@@ -601,7 +623,9 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         
         if (is_near_end && ((word >> 56) == EXTRA_TIMESTAMP || (word >> 56) == EXTRA_TIMESTAMP_MPX3)) {
             uint8_t extra_type = static_cast<uint8_t>((word >> 56) & 0xFF);
-            processor.addPacketBytes(format_type_label("Extra timestamp", extra_type), 8);
+            if (enable_accounting) {
+                processor.addPacketBytes(format_type_label("Extra timestamp", extra_type), 8);
+            }
             // This is an extra timestamp packet
             ExtraTimestamp extra_ts = decode_extra_timestamp(word);
             state.extra_timestamps.push_back(extra_ts);
@@ -618,18 +642,25 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         } else {
             // Regular packet processing
             // Check if this is a SPIDR packet ID packet that should be reordered
-            uint64_t packet_count;
-            bool is_spidr_packet_id = decode_spidr_packet_id(word, packet_count);
+            // Fast path: check type byte first before calling decode function
+            uint8_t full_type = (word >> 56) & 0xFF;
+            bool is_spidr_packet_id = (full_type == SPIDR_PACKET_ID) && reorder_buffer;
+            uint64_t packet_count = 0;
             
-            if (is_spidr_packet_id && reorder_buffer) {
+            if (is_spidr_packet_id) {
+                // Only decode if we know it's a SPIDR packet ID and reordering is enabled
+                is_spidr_packet_id = decode_spidr_packet_id(word, packet_count);
+            }
+            
+            if (is_spidr_packet_id) {
                 // Use reorder buffer for SPIDR packet ID packets
                 reorder_buffer->processPacket(word, packet_count, state.current_chunk_id,
-                    [&processor, &state, dispatcher](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
+                    [&processor, &state, dispatcher, enable_accounting](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
                         // Callback: process reordered packet
                         if (dispatcher) {
                             dispatcher->submit(w, state.chip_index, state.chunk_meta);
                         } else {
-                            process_packet(w, state.chip_index, processor, state.chunk_meta);
+                            process_packet(w, state.chip_index, processor, state.chunk_meta, enable_accounting);
                         }
                     });
             } else {
@@ -637,7 +668,7 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                 if (dispatcher) {
                     dispatcher->submit(word, state.chip_index, state.chunk_meta);
                 } else {
-                    process_packet(word, state.chip_index, processor, state.chunk_meta);
+                    process_packet(word, state.chip_index, processor, state.chunk_meta, enable_accounting);
                 }
             }
         }
@@ -997,9 +1028,10 @@ int main(int argc, char* argv[]) {
                 data_ptr += to_copy;
                 remaining -= to_copy;
                 if (leftover.size() == 8) {
-            process_raw_data(leftover.data(), 8, processor, stream_state,
-                        dispatcher ? dispatcher.get() : nullptr,
-                        reorder_buffer ? reorder_buffer.get() : nullptr);
+                    process_raw_data(leftover.data(), 8, processor, stream_state,
+                                dispatcher ? dispatcher.get() : nullptr,
+                                reorder_buffer ? reorder_buffer.get() : nullptr,
+                                !stats_final_only);
                     total_packets_received += 1;
                     words_processed_this_chunk += 1;
                     leftover.clear();
@@ -1010,7 +1042,8 @@ int main(int argc, char* argv[]) {
             if (aligned > 0) {
                 process_raw_data(data_ptr, aligned, processor, stream_state,
                         dispatcher ? dispatcher.get() : nullptr,
-                        reorder_buffer ? reorder_buffer.get() : nullptr);
+                        reorder_buffer ? reorder_buffer.get() : nullptr,
+                        !stats_final_only);
                 size_t words = aligned / 8;
                 total_packets_received += words;
                 words_processed_this_chunk += words;
@@ -1077,6 +1110,8 @@ int main(int argc, char* argv[]) {
         std::atomic<bool> processing_active{true};
         
         std::cout << "Queue size: " << queue_size << " buffers" << std::endl;
+        // Note: Chunk parsing is inherently sequential (chunks can span buffers),
+        // so we use a single processing thread. Parallelism is achieved via DecodeDispatcher.
         
         TCPServer server(host, port);
         
@@ -1124,7 +1159,9 @@ int main(int argc, char* argv[]) {
             }
         });
         
-        // Processing thread: pulls from queue and processes data
+        // Single processing thread: pulls from queue and processes data
+        // Chunk parsing is sequential (chunks can span buffers), so we use one thread.
+        // Parallelism is achieved via DecodeDispatcher for actual decoding.
         std::thread processing_thread([&]() {
             RawDataQueue::Buffer buffer;
             // Continue processing until queue is stopped AND empty
@@ -1137,13 +1174,18 @@ int main(int argc, char* argv[]) {
                         std::cout << "[TCP] First data received: " << buffer.size << " bytes" << std::endl;
                     }
                     
+                    // Update counters
                     total_bytes_received += buffer.size;
                     total_packets_received += (buffer.size / 8);
                     
+                    // Process data (no mutex needed - single thread)
+                    // Disable packet accounting in performance mode (--stats-final-only)
                     process_raw_data(buffer.data.data(), buffer.size, processor, stream_state,
                                     dispatcher ? dispatcher.get() : nullptr,
-                                    reorder_buffer ? reorder_buffer.get() : nullptr);
+                                    reorder_buffer ? reorder_buffer.get() : nullptr,
+                                    !stats_final_only);
                     
+                    // Handle statistics printing
                     if (!stats_disable && stats_interval > 0 && !stats_final_only) {
                         print_counter += (buffer.size / 8);
                         if (print_counter >= stats_interval) {
@@ -1227,7 +1269,8 @@ int main(int argc, char* argv[]) {
             std::cout << "\n⚠️  WARNING: " << dropped 
                       << " buffer(s) were dropped due to queue full (size: " << queue_size << ")!" << std::endl;
             std::cout << "   Consider increasing queue size (--queue-size N) or decoder workers (--decoder-workers N)." << std::endl;
-            std::cout << "   Dropped buffers indicate processing cannot keep up with network receive rate." << std::endl;
+            std::cout << "   Dropped buffers indicate chunk parsing cannot keep up with network receive rate." << std::endl;
+            std::cout << "   Note: Parallelism is achieved via DecodeDispatcher workers for actual decoding." << std::endl;
         }
         
         if (dispatcher) {
