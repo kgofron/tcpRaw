@@ -827,6 +827,7 @@ int main(int argc, char* argv[]) {
     bool exit_on_disconnect = false; // Exit after connection closes (don't auto-reconnect)
     size_t decoder_workers = 0;    // 0 = auto (stream=4, file=1)
     bool decoder_workers_overridden = false;
+    size_t queue_size = 2000;      // Queue size for producer/consumer pipeline (default: 2000 buffers)
     std::string input_file;
     bool file_mode = false;
     std::filesystem::path file_path;
@@ -858,6 +859,8 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--decoder-workers" && i + 1 < argc) {
             decoder_workers = std::stoul(argv[++i]);
             decoder_workers_overridden = true;
+        } else if (arg == "--queue-size" && i + 1 < argc) {
+            queue_size = std::stoul(argv[++i]);
         } else if (arg == "--exit-on-disconnect") {
             exit_on_disconnect = true;
         } else if (arg == "--input-file" && i + 1 < argc) {
@@ -878,7 +881,10 @@ int main(int argc, char* argv[]) {
             std::cout << "  --stats-final-only    Only print final statistics (no periodic)" << std::endl;
             std::cout << "  --stats-disable       Disable all statistics printing" << std::endl;
             std::cout << "  --recent-hit-count N  Retain N recent hits for summary (default: 10, 0=disable)" << std::endl;
+            std::cout << "Performance options:" << std::endl;
             std::cout << "  --decoder-workers N   Number of parallel decoder workers (default: auto)" << std::endl;
+            std::cout << "  --queue-size N        Queue size for producer/consumer pipeline (default: 2000)" << std::endl;
+            std::cout << "Other options:" << std::endl;
             std::cout << "  --exit-on-disconnect  Exit after connection closes (don't auto-reconnect)" << std::endl;
             std::cout << "  --help                Show this help message" << std::endl;
             return 0;
@@ -1067,8 +1073,10 @@ int main(int argc, char* argv[]) {
         }
     } else {
         // Producer/consumer pipeline: network thread pushes to queue, processing thread drains it
-        RawDataQueue data_queue(200);  // Max 200 buffers in queue (flow control)
+        RawDataQueue data_queue(queue_size);  // Configurable queue size (default: 2000 buffers)
         std::atomic<bool> processing_active{true};
+        
+        std::cout << "Queue size: " << queue_size << " buffers" << std::endl;
         
         TCPServer server(host, port);
         
@@ -1217,8 +1225,9 @@ int main(int argc, char* argv[]) {
         uint64_t dropped = data_queue.getDroppedBuffers();
         if (dropped > 0) {
             std::cout << "\n⚠️  WARNING: " << dropped 
-                      << " buffer(s) were dropped due to queue full!" << std::endl;
-            std::cout << "   Consider increasing queue size or processing threads." << std::endl;
+                      << " buffer(s) were dropped due to queue full (size: " << queue_size << ")!" << std::endl;
+            std::cout << "   Consider increasing queue size (--queue-size N) or decoder workers (--decoder-workers N)." << std::endl;
+            std::cout << "   Dropped buffers indicate processing cannot keep up with network receive rate." << std::endl;
         }
         
         if (dispatcher) {
