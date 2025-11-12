@@ -62,6 +62,93 @@ struct DecodeTask {
     ChunkMetadata chunk_meta{};
 };
 
+// Thread-safe queue for raw data buffers between network and processing threads
+class RawDataQueue {
+public:
+    struct Buffer {
+        std::vector<uint8_t> data;
+        size_t size = 0;
+        
+        Buffer() = default;
+        Buffer(const uint8_t* src, size_t len) : data(src, src + len), size(len) {}
+    };
+    
+    RawDataQueue(size_t max_buffers = 100) 
+        : max_buffers_(max_buffers), 
+          stop_(false),
+          dropped_buffers_(0) {}
+    
+    // Push a buffer (non-blocking, drops if full)
+    // Returns true if successfully enqueued, false if dropped
+    bool push(const uint8_t* data, size_t size) {
+        if (stop_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        
+        std::unique_lock<std::mutex> lock(mutex_);
+        
+        // Drop oldest buffer if queue is full (flow control)
+        if (queue_.size() >= max_buffers_) {
+            queue_.pop();
+            dropped_buffers_.fetch_add(1, std::memory_order_relaxed);
+        }
+        
+        queue_.emplace(data, size);
+        lock.unlock();
+        cond_.notify_one();
+        return true;
+    }
+    
+    // Pop a buffer (blocking with timeout)
+    // Returns true if buffer was retrieved, false if timeout or stopped
+    bool pop(Buffer& buffer, std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        
+        bool notified = cond_.wait_for(lock, timeout, [this]() {
+            return !queue_.empty() || stop_.load(std::memory_order_acquire);
+        });
+        
+        if (!notified || queue_.empty()) {
+            return false;
+        }
+        
+        buffer = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    
+    // Signal shutdown
+    void stop() {
+        stop_.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(mutex_);
+        cond_.notify_all();
+    }
+    
+    // Check if stopped
+    bool isStopped() const {
+        return stop_.load(std::memory_order_acquire);
+    }
+    
+    // Get number of dropped buffers
+    uint64_t getDroppedBuffers() const {
+        return dropped_buffers_.load(std::memory_order_acquire);
+    }
+    
+    // Get current queue size (approximate)
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+    
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable cond_;
+    std::queue<Buffer> queue_;
+    size_t max_buffers_;
+    std::atomic<bool> stop_;
+    std::atomic<uint64_t> dropped_buffers_;
+};
+
 class DecodeDispatcher {
 public:
     struct PartialStats {
@@ -979,6 +1066,10 @@ int main(int argc, char* argv[]) {
             dispatcher->waitUntilIdle();
         }
     } else {
+        // Producer/consumer pipeline: network thread pushes to queue, processing thread drains it
+        RawDataQueue data_queue(200);  // Max 200 buffers in queue (flow control)
+        std::atomic<bool> processing_active{true};
+        
         TCPServer server(host, port);
         
         if (!server.initialize()) {
@@ -994,9 +1085,18 @@ int main(int argc, char* argv[]) {
         }
         
         static TCPServer* g_server = &server;
+        static RawDataQueue* g_queue = &data_queue;
+        static std::atomic<bool>* g_processing = &processing_active;
+        
         signal(SIGINT, [](int) {
             if (g_server) {
                 g_server->stop();
+            }
+            if (g_queue) {
+                g_queue->stop();
+            }
+            if (g_processing) {
+                g_processing->store(false);
             }
             std::cout << "\n[SIGINT] Received interrupt signal, shutting down gracefully..." << std::endl;
         });
@@ -1007,61 +1107,98 @@ int main(int argc, char* argv[]) {
                 std::cout << "Waiting for data...\n" << std::endl;
             } else {
                 std::cout << "✗ Client disconnected" << std::endl;
+                // Signal queue to stop when connection closes
+                data_queue.stop();
                 if (exit_on_disconnect) {
                     server.stop();
+                    processing_active.store(false);
                 }
             }
         });
         
-        server.run([&](const uint8_t* data, size_t size) {
-            if (!first_data_received) {
-                first_data_received = true;
-                first_data_time = std::chrono::steady_clock::now();
-                std::cout << "[TCP] First data received: " << size << " bytes" << std::endl;
-            }
-            
-            total_bytes_received += size;
-            total_packets_received += (size / 8);
-            
-            process_raw_data(data, size, processor, stream_state,
-                            dispatcher ? dispatcher.get() : nullptr,
-                            reorder_buffer ? reorder_buffer.get() : nullptr);
-            
-            if (!stats_disable && stats_interval > 0 && !stats_final_only) {
-                print_counter += (size / 8);
-                if (print_counter >= stats_interval) {
-                    std::cout << "\n[Periodic Statistics Update]" << std::endl;
-                    if (dispatcher) {
-                        dispatcher->waitUntilIdle();
+        // Processing thread: pulls from queue and processes data
+        std::thread processing_thread([&]() {
+            RawDataQueue::Buffer buffer;
+            // Continue processing until queue is stopped AND empty
+            while (true) {
+                if (data_queue.pop(buffer, std::chrono::milliseconds(100))) {
+                    // Successfully popped a buffer, process it
+                    if (!first_data_received) {
+                        first_data_received = true;
+                        first_data_time = std::chrono::steady_clock::now();
+                        std::cout << "[TCP] First data received: " << buffer.size << " bytes" << std::endl;
                     }
-                    processor.finalizeRates();
-                    print_statistics(processor);
-                    std::cout << std::endl;
-                    print_counter = 0;
-                }
-            }
-            
-            if (!stats_disable && stats_time_interval > 0) {
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                    now - last_status_print).count();
-                if (elapsed >= stats_time_interval) {
-                    if (dispatcher) {
-                        dispatcher->flushAll();
+                    
+                    total_bytes_received += buffer.size;
+                    total_packets_received += (buffer.size / 8);
+                    
+                    process_raw_data(buffer.data.data(), buffer.size, processor, stream_state,
+                                    dispatcher ? dispatcher.get() : nullptr,
+                                    reorder_buffer ? reorder_buffer.get() : nullptr);
+                    
+                    if (!stats_disable && stats_interval > 0 && !stats_final_only) {
+                        print_counter += (buffer.size / 8);
+                        if (print_counter >= stats_interval) {
+                            std::cout << "\n[Periodic Statistics Update]" << std::endl;
+                            if (dispatcher) {
+                                dispatcher->waitUntilIdle();
+                            }
+                            processor.finalizeRates();
+                            print_statistics(processor);
+                            std::cout << std::endl;
+                            print_counter = 0;
+                        }
                     }
-                    const Statistics& stats = processor.getStatistics();
-                    uint64_t hits_diff = stats.total_hits - last_hits;
-                    std::cout << "[Status] Processed " << hits_diff << " hits in last "
-                              << stats_time_interval << "s" << std::endl;
-                    std::cout << "[Status] Total bytes received: " << total_bytes_received
-                              << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
-                    std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
-                    last_hits = stats.total_hits;
-                    last_status_print = now;
+                    
+                    if (!stats_disable && stats_time_interval > 0) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            now - last_status_print).count();
+                        if (elapsed >= stats_time_interval) {
+                            if (dispatcher) {
+                                dispatcher->flushAll();
+                            }
+                            const Statistics& stats = processor.getStatistics();
+                            uint64_t hits_diff = stats.total_hits - last_hits;
+                            std::cout << "[Status] Processed " << hits_diff << " hits in last "
+                                      << stats_time_interval << "s" << std::endl;
+                            std::cout << "[Status] Total bytes received: " << total_bytes_received
+                                      << " (" << (total_bytes_received / 1024.0 / 1024.0) << " MB)" << std::endl;
+                            std::cout << "[Status] Total packets (words) received: " << total_packets_received << std::endl;
+                            last_hits = stats.total_hits;
+                            last_status_print = now;
+                        }
+                    }
+                } else {
+                    // pop() returned false - check if we should exit
+                    // Exit if queue is stopped AND empty (no more data to process)
+                    if (data_queue.isStopped() && data_queue.size() == 0) {
+                        break;
+                    }
+                    // Otherwise, continue (might be a timeout, more data could arrive)
                 }
             }
         });
+        
+        // Network thread: pushes data to queue (non-blocking)
+        server.run([&](const uint8_t* data, size_t size) {
+            // Push to queue immediately and return (non-blocking)
+            // This allows the network thread to quickly return to recv()
+            data_queue.push(data, size);
+        });
+        
+        // Network thread finished, signal processing thread to stop
+        data_queue.stop();
+        processing_active.store(false, std::memory_order_release);
+        
+        // Wait for processing thread to finish draining the queue
+        if (processing_thread.joinable()) {
+            processing_thread.join();
+        }
+        
         g_server = nullptr;
+        g_queue = nullptr;
+        g_processing = nullptr;
         
         if (!first_data_received) {
             std::cout << "\n[WARNING] No data was received from SERVAL!" << std::endl;
@@ -1073,7 +1210,16 @@ int main(int argc, char* argv[]) {
         
         conn_stats = server.getConnectionStats();
         bytes_dropped_incomplete = conn_stats.bytes_dropped_incomplete;
-        total_bytes_received = conn_stats.bytes_received;
+        // Note: total_bytes_received is updated by the processing thread
+        // conn_stats.bytes_received reflects bytes received from socket (may differ if buffers dropped)
+        
+        // Report queue statistics
+        uint64_t dropped = data_queue.getDroppedBuffers();
+        if (dropped > 0) {
+            std::cout << "\n⚠️  WARNING: " << dropped 
+                      << " buffer(s) were dropped due to queue full!" << std::endl;
+            std::cout << "   Consider increasing queue size or processing threads." << std::endl;
+        }
         
         if (dispatcher) {
             dispatcher->waitUntilIdle();
