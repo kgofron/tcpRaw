@@ -52,9 +52,11 @@ struct StreamState {
     std::vector<ExtraTimestamp> extra_timestamps;
     bool saw_first_chunk_header = false;
     bool mid_stream_flagged = false;
+    std::vector<uint64_t> batch_buffer;  // Batch buffer for dispatcher submissions
 
     StreamState() {
         extra_timestamps.reserve(3);
+        batch_buffer.reserve(128);  // Pre-allocate batch buffer
     }
 };
 
@@ -266,17 +268,28 @@ public:
         size_t index = chip_index % worker_data_.size();
         pending_tasks_.fetch_add(1, std::memory_order_release);
         auto& data = *worker_data_[index];
-        bool was_empty = false;
         {
             std::lock_guard<std::mutex> lock(data.mutex);
-            was_empty = data.queue.empty();
             data.queue.push(DecodeTask{word, chip_index, meta});
         }
-        // Only notify if queue was empty (worker was waiting)
-        // This reduces unnecessary wake-ups when queue already has work
-        if (was_empty) {
-            data.cond.notify_one();
+        // Notify worker (notify_one is cheap, and ensures workers stay responsive)
+        data.cond.notify_one();
+    }
+
+    // Batch submit multiple words to reduce mutex contention
+    void submitBatch(const std::vector<uint64_t>& words, uint8_t chip_index, const ChunkMetadata& meta) {
+        if (words.empty()) return;
+        size_t index = chip_index % worker_data_.size();
+        pending_tasks_.fetch_add(words.size(), std::memory_order_release);
+        auto& data = *worker_data_[index];
+        {
+            std::lock_guard<std::mutex> lock(data.mutex);
+            for (uint64_t word : words) {
+                data.queue.push(DecodeTask{word, chip_index, meta});
+            }
         }
+        // Only notify once after batch submission
+        data.cond.notify_one();
     }
 
     void waitUntilIdle() {
@@ -572,12 +585,27 @@ void process_packet(uint64_t word, uint8_t chip_index, HitProcessor& processor, 
     }
 }
 
+// Flush batch buffer to dispatcher or process directly
+static void flushBatch(StreamState& state, HitProcessor& processor, DecodeDispatcher* dispatcher, bool enable_accounting) {
+    if (state.batch_buffer.empty()) return;
+    
+    if (dispatcher) {
+        dispatcher->submitBatch(state.batch_buffer, state.chip_index, state.chunk_meta);
+    } else {
+        for (uint64_t word : state.batch_buffer) {
+            process_packet(word, state.chip_index, processor, state.chunk_meta, enable_accounting);
+        }
+    }
+    state.batch_buffer.clear();
+}
+
 // Process raw data buffer
 void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& processor, StreamState& state,
                       DecodeDispatcher* dispatcher, PacketReorderBuffer* reorder_buffer = nullptr,
                       bool enable_accounting = true) {
     const uint64_t* data_words = reinterpret_cast<const uint64_t*>(buffer);
     size_t num_words = bytes / 8;
+    constexpr size_t BATCH_SIZE = 128;  // Batch size for dispatcher submissions
     
     for (size_t i = 0; i < num_words; ++i) {
         uint64_t word = data_words[i];
@@ -585,6 +613,9 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         // Fast inline chunk header check (avoid struct creation on hot path)
         // TPX3_MAGIC is 0x33585054 ('TPX3' in little-endian)
         if ((word & 0xFFFFFFFFULL) == TPX3_MAGIC) {
+            // Flush any pending batch before starting new chunk
+            flushBatch(state, processor, dispatcher, enable_accounting);
+            
             // Found chunk header - inline field access to avoid struct creation
             if (enable_accounting) {
                 processor.addPacketBytes("Chunk header", 8);
@@ -639,15 +670,21 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
         
         state.chunk_words_remaining--;
         
+        // Fast path: Check packet type byte first (most words are pixel data)
+        uint8_t full_type = (word >> 56) & 0xFF;
+        
         // Check if we're near the end of chunk (last 3 words are extra timestamps)
         bool is_near_end = (state.chunk_words_remaining <= 3);
         
-        if (is_near_end && ((word >> 56) == EXTRA_TIMESTAMP || (word >> 56) == EXTRA_TIMESTAMP_MPX3)) {
-            uint8_t extra_type = static_cast<uint8_t>((word >> 56) & 0xFF);
+        if (is_near_end && (full_type == EXTRA_TIMESTAMP || full_type == EXTRA_TIMESTAMP_MPX3)) {
+            // Flush batch before processing extra timestamp (chunk_meta may change)
+            flushBatch(state, processor, dispatcher, enable_accounting);
+            
+            // Extra timestamp packet (rare - only at end of chunk)
+            uint8_t extra_type = static_cast<uint8_t>(full_type);
             if (enable_accounting) {
                 processor.addPacketBytes(format_type_label("Extra timestamp", extra_type), 8);
             }
-            // This is an extra timestamp packet
             ExtraTimestamp extra_ts = decode_extra_timestamp(word);
             state.extra_timestamps.push_back(extra_ts);
             
@@ -660,21 +697,13 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                 
                 processor.processChunkMetadata(state.chunk_meta);
             }
-        } else {
-            // Regular packet processing
-            // Check if this is a SPIDR packet ID packet that should be reordered
-            // Fast path: check type byte first before calling decode function
-            uint8_t full_type = (word >> 56) & 0xFF;
-            bool is_spidr_packet_id = (full_type == SPIDR_PACKET_ID) && reorder_buffer;
+        } else if (full_type == SPIDR_PACKET_ID && reorder_buffer) {
+            // Flush batch before processing SPIDR packet ID (needs reordering)
+            flushBatch(state, processor, dispatcher, enable_accounting);
+            
+            // SPIDR packet ID packet (needs reordering) - decode and reorder
             uint64_t packet_count = 0;
-            
-            if (is_spidr_packet_id) {
-                // Only decode if we know it's a SPIDR packet ID and reordering is enabled
-                is_spidr_packet_id = decode_spidr_packet_id(word, packet_count);
-            }
-            
-            if (is_spidr_packet_id) {
-                // Use reorder buffer for SPIDR packet ID packets
+            if (decode_spidr_packet_id(word, packet_count)) {
                 reorder_buffer->processPacket(word, packet_count, state.current_chunk_id,
                     [&processor, &state, dispatcher, enable_accounting](uint64_t w, uint64_t /*id*/, uint64_t /*chunk*/) {
                         // Callback: process reordered packet
@@ -685,19 +714,33 @@ void process_raw_data(const uint8_t* buffer, size_t bytes, HitProcessor& process
                         }
                     });
             } else {
-                // Process immediately (not SPIDR packet ID or reordering disabled)
+                // Decode failed, submit directly
                 if (dispatcher) {
                     dispatcher->submit(word, state.chip_index, state.chunk_meta);
                 } else {
                     process_packet(word, state.chip_index, processor, state.chunk_meta, enable_accounting);
                 }
             }
+        } else {
+            // Fast path: Regular packet (most common case - pixel data, TDC, control, etc.)
+            // Collect in batch buffer to reduce mutex contention
+            state.batch_buffer.push_back(word);
+            
+            // Flush batch when it reaches BATCH_SIZE
+            if (state.batch_buffer.size() >= BATCH_SIZE) {
+                flushBatch(state, processor, dispatcher, enable_accounting);
+            }
         }
         
         if (state.chunk_words_remaining == 0) {
+            // Flush batch at chunk boundary
+            flushBatch(state, processor, dispatcher, enable_accounting);
             state.in_chunk = false;
         }
     }
+    
+    // Flush any remaining batch at end of buffer
+    flushBatch(state, processor, dispatcher, enable_accounting);
     
     // Flush pending chunk count updates
     if (state.pending_chunk_updates > 0) {
